@@ -1,0 +1,42 @@
+version: 1
+formulas:
+  - id: temporal_absolute_change
+    version: 1
+    generator: temporal_pair
+    operations: [subtract, abs]
+    description: Absolute magnitude of a metric's change between two periods.
+  - id: temporal_percent_change
+    version: 1
+    generator: temporal_pair
+    operations: [percent_change, abs]
+    description: Absolute percentage change of a metric between two periods.
+  - id: cross_source_ratio
+    version: 1
+    generator: compatible_ratio
+    operations: [ratio]
+    description: Ratio formed from two disclosed numeric facts.
+  - id: cross_source_average
+    version: 1
+    generator: compatible_average
+    operations: [average]
+    description: Average of compatible observations disclosed by multiple sources.
+  - id: cross_source_verification
+    version: 1
+    generator: compatible_verification
+    operations: [equals]
+    description: Verification that compatible observations agree.
+  - id: three_period_trend
+    version: 1
+    generator: temporal_trend
+    operations: [subtract, average, abs]
+    description: Magnitude of the average period-over-period change across three periods.
+  - id: temporal_ratio_change
+    version: 1
+    generator: ratio_change
+    operations: [ratio, subtract, abs]
+    description: Absolute change in a same-scope financial ratio across two periods.
+  - id: multi_source_verification
+    version: 1
+    generator: multi_verification
+    operations: [equals, and]
+    description: Verify agreement of compatible observations across three sources.

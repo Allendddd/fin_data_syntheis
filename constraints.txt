@@ -1,0 +1,7 @@
+setuptools==75.6.0
+wheel==0.45.1
+PyYAML==6.0.2
+jsonschema==4.23.0
+pyarrow==18.1.0
+duckdb==1.2.2
+httpx==0.28.1

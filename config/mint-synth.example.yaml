@@ -1,0 +1,126 @@
+version: 2
+
+run:
+  name: finance-synthesis
+  work_dir: ../work
+  random_seed: 42
+  fingerprint_mode: metadata
+  cutoff: "2026-09-29"
+
+input:
+  paths: [../data]
+  recursive: true
+  include: ["**/*.jsonl", "**/*.parquet"]
+  exclude: ["**/_temporary/**", "**/.*/**"]
+  follow_symlinks: false
+  text_field: text
+  max_text_chars: 20000000
+  max_jsonl_line_bytes: 67108864
+  id_field: null
+  metadata_fields: [title, published_at, url, ticker, lei, cik]
+  invalid_record_policy: quarantine
+
+output:
+  root: ../outputs
+  compression: zstd
+  parquet_row_group_rows: 50000
+  export_formats: [parquet, jsonl]
+  artifact_checksums: true
+
+slurm:
+  # 使用 scripts/submit_slurm.sh 时，分区、账号、QOS、CPU、内存和时限以 slurm/*.sbatch 为准。
+  # 下列 account/partition/qos/extra_sbatch_args/stage_resources 仅供旧的动态生成模式使用。
+  account: null
+  partition: compute
+  qos: null
+  apptainer_image: ../deploy/mint-synth.sif
+  image_fingerprint_mode: sha256
+  bind_paths: [../data, ../work, ../outputs]
+  max_parallel_tasks: 64
+  max_array_tasks: 1000
+  extra_sbatch_args: []
+  # 直接 sbatch 模式的资源写在 slurm/*.sbatch；旧的动态生成模式仍可在这里逐阶段覆盖。
+  stage_resources: {}
+
+llm:
+  endpoints:
+    inference:
+      base_url: http://llm-service.internal:8000/v1
+      api_key_env: FIN_LLM_API_KEY
+      require_api_key: true
+      strict_json: true
+      send_seed: true
+  roles:
+    extractor: {endpoint: inference, model: finance-extractor, revision: model-build-202609, temperature: 0.0}
+    constructor: {endpoint: inference, model: finance-constructor, revision: model-build-202609, temperature: 0.3}
+    auditor: {endpoint: inference, model: finance-auditor, revision: model-build-202609, temperature: 0.0}
+    entity_resolver: {endpoint: inference, model: finance-resolver, revision: model-build-202609, temperature: 0.0}
+  timeout_seconds: 120
+  retries: 4
+  backoff_seconds: 1
+  concurrency_per_worker: 8
+  cache: {backend: sqlite, policy: immutable, busy_timeout_seconds: 60}
+
+reader:
+  batch_rows: 8192
+  jsonl_byte_shard_size: 1073741824
+  normalize_target_bytes: 8589934592
+  dedup_buckets: 4096
+  shuffle_partitions: 256
+  external_id_partitions: 256
+  duckdb_memory_limit: 8GB
+  duckdb_threads: 4
+
+chunking: {max_chars: 6000, overlap_chars: 400, min_chars: 600}
+extraction: {max_facts_per_chunk: 30, max_entity_chars: 256, max_metric_chars: 256, max_period_chars: 64}
+atomic: {enabled: true, tasks_per_chunk: 2, language: auto}
+query_realization: {seed_file: null, language: auto, max_question_chars: 1000}
+
+entity_resolution:
+  alias_file: null
+  identifier_fields: [ticker, lei, cik]
+  llm_fallback: true
+  llm_max_evidence_facts: 50
+  llm_max_surfaces: 100
+  buckets: 256
+  max_facts_per_block: 250000
+
+dag:
+  formula_registry: builtin
+  max_depth: 4
+  min_depth: 2
+  beam_width: 32
+  max_candidate_groups_per_formula: 4096
+  max_graphs_per_entity: 8
+  max_facts_per_entity: 100000
+  min_sources: 2
+  entity_buckets: 2048
+  allowed_operations: [subtract, percent_change, ratio, average, abs, equals, and]
+  llm_supplement: true
+  min_rule_graphs_before_supplement: 1
+  supplement_max_facts: 80
+  supplement_max_relations: 20
+
+quality:
+  max_invalid_record_ratio: 0.001
+  max_external_id_conflict_ratio: 0.001
+  max_llm_terminal_error_ratio: 0.02
+  max_validation_failure_ratio: 0.01
+  require_independent_auditor: true
+  overlap_threshold: 0.82
+  answer_tolerance: "1e-6"
+  evaluation_file: null
+  max_evaluation_questions: 100000
+  min_validated_tasks: 1
+
+stages:
+  normalize: true
+  facts: true
+  atomic: true
+  entity_resolution: true
+  graph_planning: true
+  query_realization: true
+  validation: true
+  export: true
+
+logging: {level: INFO, json: true}

@@ -1,0 +1,28 @@
+Bootstrap: docker
+From: python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+
+%labels
+    org.opencontainers.image.title mint-synth
+    org.opencontainers.image.version 2.0.0
+
+%files
+    constraints.txt /opt/mint-synth/constraints.txt
+    pyproject.toml /opt/mint-synth/pyproject.toml
+    README.md /opt/mint-synth/README.md
+    LICENSE /opt/mint-synth/LICENSE
+    src /opt/mint-synth/src
+
+%post
+    cd /opt/mint-synth
+    python -m pip install --no-cache-dir --constraint constraints.txt setuptools wheel
+    python -m pip install --no-cache-dir --no-build-isolation --constraint constraints.txt .
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONDONTWRITEBYTECODE=1
+
+%runscript
+    exec mint-synth "$@"
+
+%test
+    python -m mint_synth --help >/dev/null
