@@ -22,9 +22,40 @@ def _require_yaml():
     return yaml
 
 
-def _schema() -> dict[str, Any]:
+def _schema(version: int = 2) -> dict[str, Any]:
+    if version not in (2, 3):
+        raise ConfigError(f"unsupported configuration version: {version}")
     resource = resources.files("mint_synth").joinpath("resources/config-v2.schema.json")
-    return json.loads(resource.read_text(encoding="utf-8"))
+    schema = json.loads(resource.read_text(encoding="utf-8"))
+    if version == 3:
+        schema["$id"] = "https://mint-synth.local/schema/config-v3.json"
+        schema["title"] = "mint-synth v3 SFT configuration"
+        schema["properties"]["version"] = {"const": 3}
+        schema["properties"]["run"]["properties"]["fingerprint_mode"]["default"] = "sha256"
+        schema["properties"]["slurm"]["properties"]["stage_resources"]["propertyNames"]["enum"].extend(["corpus_index", "retrieval_index", "sft_prepare"])
+        schema["properties"]["input"]["properties"]["available_at_field"] = {"type": "string", "minLength": 1, "default": "published_at"}
+        schema["properties"]["training"] = {
+            "type": "object", "additionalProperties": False, "default": {},
+            "properties": {
+                "enabled": {"type": "boolean", "default": True},
+                "atomic_enabled": {"type": "boolean", "default": True},
+                "long_enabled": {"type": "boolean", "default": True},
+                "teacher_role": {"enum": ["constructor", "auditor", "extractor", "entity_resolver"], "default": "constructor"},
+                "rollouts_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
+                "max_tool_steps": {"type": "integer", "minimum": 2, "maximum": 64, "default": 16},
+                "max_context_chars": {"type": "integer", "minimum": 2000, "default": 24000},
+                "split_validation_fraction": {"type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05},
+                "min_atomic_samples": {"type": "integer", "minimum": 1, "default": 1},
+                "min_long_samples": {"type": "integer", "minimum": 1, "default": 1},
+                "objective_types": {"type": "array", "uniqueItems": True, "items": {"enum": ["comparison", "change", "ratio", "aggregation", "verification"]}, "default": []},
+                "capabilities": {"type": "array", "uniqueItems": True, "items": {"enum": ["knowledge", "extraction", "calculation", "analysis", "verification"]}, "default": []},
+                "financial_topics": {"type": "array", "uniqueItems": True, "items": {"type": "string"}, "default": []},
+                "formula_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string"}, "default": []},
+                "seed_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string"}, "default": []},
+                "seed_fallback": {"type": "boolean", "default": False},
+            },
+        }
+    return schema
 
 
 def _inject_defaults(instance: Any, schema: Mapping[str, Any], root: Mapping[str, Any]) -> Any:
@@ -69,11 +100,34 @@ def _validate_schema(config: dict[str, Any], schema: dict[str, Any]) -> None:
 
 def materialize_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
     value = copy.deepcopy(dict(config))
-    schema = _schema()
+    schema = _schema(int(value.get("version", 2)))
     return _inject_defaults(value, schema, schema)
 
 
 def validate_cross_fields(config: Mapping[str, Any]) -> None:
+    if config.get("version") == 3:
+        training = config.get("training", {})
+        if not training.get("enabled", True):
+            raise ConfigError("v3 runs require training.enabled=true")
+        if config.get("run", {}).get("fingerprint_mode") != "sha256":
+            raise ConfigError("v3 runs require run.fingerprint_mode=sha256")
+        if not config.get("run", {}).get("cutoff"):
+            raise ConfigError("v3 runs require run.cutoff for the frozen snapshot")
+        available_field = config.get("input", {}).get("available_at_field", "published_at")
+        if training.get("long_enabled", True) and available_field not in config.get("input", {}).get("metadata_fields", []):
+            raise ConfigError("input.available_at_field must also be listed in input.metadata_fields")
+        if training.get("atomic_enabled", True) and not config.get("atomic", {}).get("enabled", True):
+            raise ConfigError("training.atomic_enabled requires atomic.enabled")
+        if training.get("long_enabled", True) and not config.get("stages", {}).get("query_realization", True):
+            raise ConfigError("training.long_enabled requires stages.query_realization")
+        if training.get("atomic_enabled", True) and not config.get("stages", {}).get("atomic", True):
+            raise ConfigError("training.atomic_enabled requires stages.atomic")
+        if not config.get("stages", {}).get("validation", True) or not config.get("stages", {}).get("export", True):
+            raise ConfigError("v3 runs require stages.validation and stages.export")
+        if not config.get("stages", {}).get("facts", True):
+            raise ConfigError("v3 runs require stages.facts for the retrieval index")
+        if not training.get("atomic_enabled", True) and not training.get("long_enabled", True):
+            raise ConfigError("at least one training family must be enabled")
     chunking = config.get("chunking", {})
     if int(chunking.get("overlap_chars", 0)) >= int(chunking.get("max_chars", 1)):
         raise ConfigError("chunking.overlap_chars must be smaller than chunking.max_chars")
@@ -229,7 +283,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ConfigError(f"cannot parse YAML {config_path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError("configuration root must be a YAML mapping")
-    schema = _schema()
+    schema = _schema(int(raw.get("version", 2)))
     with_defaults = _inject_defaults(copy.deepcopy(raw), schema, schema)
     _validate_schema(with_defaults, schema)
     validate_cross_fields(with_defaults)

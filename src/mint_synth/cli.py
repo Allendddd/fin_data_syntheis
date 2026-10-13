@@ -6,7 +6,7 @@ import sys
 from typing import Any, Sequence
 
 from .config_v2 import ConfigError, config_fingerprint, load_config
-from .planner import create_plan, migrate_v1, run_status, validate_run_structure
+from .planner import create_plan, migrate_v1, migrate_v2, run_status, validate_run_structure
 from .run_state import RunLayout, read_json
 from .slurm import SlurmError, submit_run
 from .stages import run_worker
@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--input", required=True)
     migrate.add_argument("--output", required=True)
 
+    migrate_v2_command = commands.add_parser("migrate-v2", help="Create a v3 SFT YAML from a v2 configuration")
+    migrate_v2_command.add_argument("--input", required=True)
+    migrate_v2_command.add_argument("--output", required=True)
+    migrate_v2_command.add_argument("--cutoff", help="Override or provide the snapshot cutoff date (YYYY-MM-DD)")
+
     worker = commands.add_parser("worker", help="Internal entry point used by SLURM job arrays")
     worker.add_argument("--run-dir", required=True)
     worker.add_argument("--stage", required=True)
@@ -121,6 +126,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "migrate-v1":
             destination = migrate_v1(args.input, args.output)
+            _json({"migrated": True, "config": str(destination)})
+            return 0
+        if args.command == "migrate-v2":
+            destination = migrate_v2(args.input, args.output, cutoff=args.cutoff)
             _json({"migrated": True, "config": str(destination)})
             return 0
         if args.command == "worker":

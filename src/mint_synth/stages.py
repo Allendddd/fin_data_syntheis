@@ -55,6 +55,7 @@ from .run_state import (
     stage_signature,
     utc_now,
 )
+from .sft import atomic_messages, build_corpus_index, build_entity_partition, financial_topic, long_rollout, published_date, selected, split_for_task
 from .runtime import bounded_map, client_for_role
 from .util import stable_id
 
@@ -555,6 +556,9 @@ def stage_atomic(
         answer_tolerance=str(config["quality"]["answer_tolerance"]),
     )
     capabilities = sorted(CAPABILITIES)
+    if config.get("version") == 3 and config["training"]["capabilities"]:
+        capabilities = [capability for capability in capabilities if capability in config["training"]["capabilities"]]
+    selected_topics = set(config.get("training", {}).get("financial_topics") or [])
     per_chunk = int(config["atomic"]["tasks_per_chunk"])
     workers = int(config["llm"]["concurrency_per_worker"])
     batch_rows = int(config["reader"]["batch_rows"])
@@ -570,6 +574,8 @@ def stage_atomic(
                 facts = current[1]
                 current = next(fact_groups, None)
             if not facts:
+                continue
+            if selected_topics and not any(financial_topic({"evidence": [fact]}) in selected_topics for fact in facts):
                 continue
             for index in range(per_chunk):
                 offset = int(
@@ -963,6 +969,25 @@ def stage_graph_planning(
         write_empty(output / "quarantine.parquet", quarantine_schema(), compression=_compression(config))
         return {"entities": 0, "rule_graphs": 0, "graphs": 0, "llm": {}}
     formulas = load_formula_registry(str(config["dag"]["formula_registry"]))
+    seeds = load_seed_bank(config["query_realization"].get("seed_file"))
+    training = config.get("training", {})
+    if training.get("seed_fallback") and config["query_realization"].get("seed_file"):
+        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS)
+    wanted_ids = set(training.get("seed_ids") or [])
+    if wanted_ids:
+        seeds = [seed for seed in seeds if seed["seed_id"] in wanted_ids]
+    wanted_objective_filter = set(training.get("objective_types") or [])
+    if wanted_objective_filter:
+        seeds = [seed for seed in seeds if seed["task_spec_template"]["objective_type"] in wanted_objective_filter]
+    objective_by_generator = {
+        "temporal_pair": "change", "compatible_ratio": "ratio",
+        "compatible_average": "aggregation", "compatible_verification": "verification",
+        "temporal_trend": "change", "ratio_change": "change", "multi_verification": "verification",
+    }
+    if config.get("version") == 3:
+        wanted_objectives = {seed["task_spec_template"]["objective_type"] for seed in seeds}
+        wanted_formulas = set(training.get("formula_ids") or [])
+        formulas = [formula for formula in formulas if objective_by_generator.get(formula.generator) in wanted_objectives and (not wanted_formulas or formula.formula_id in wanted_formulas)]
     planner = RuleDagPlanner(
         formulas,
         allowed_operations=config["dag"]["allowed_operations"],
@@ -991,6 +1016,12 @@ def stage_graph_planning(
             max_group_rows=int(config["dag"]["max_facts_per_entity"]),
         ):
             counts["entities"] += 1
+            if config.get("version") == 3:
+                cutoff = str(config["run"]["cutoff"])
+                available_field = str(config["input"]["available_at_field"])
+                facts = [fact for fact in facts if not (available := published_date(fact.get("source_metadata") or {}, available_field)) or available <= cutoff]
+            if not facts:
+                continue
             candidates = planner.plan_entity(facts)
             counts["rule_graphs"] += len(candidates)
             if len(candidates) < minimum and supplement_client is not None:
@@ -1014,6 +1045,22 @@ def stage_graph_planning(
                         )
                     )
             for candidate in candidates[: int(config["dag"]["max_graphs_per_entity"])]:
+                if config.get("version") == 3:
+                    try:
+                        eligible_seeds = [
+                            seed for seed in seeds
+                            if not seed["task_spec_template"]["time_sensitive"]
+                            or all(published_date(fact.get("source_metadata") or {}, config["input"]["available_at_field"]) for fact in candidate["evidence"])
+                        ]
+                        seed = _seed_for_candidate(candidate, eligible_seeds, int(config["run"]["random_seed"]))
+                    except ValueError:
+                        continue
+                    candidate["seed"] = seed
+                    candidate["task_spec"]["time_sensitive"] = bool(seed["task_spec_template"]["time_sensitive"])
+                    candidate["task_spec"]["reasoning_form"] = seed["task_spec_template"]["reasoning_form"]
+                    selected_topics = set(training.get("financial_topics") or [])
+                    if selected_topics and financial_topic(candidate) not in selected_topics:
+                        continue
                 if candidate["graph_id"] in seen_graphs:
                     continue
                 seen_graphs.add(candidate["graph_id"])
@@ -1036,6 +1083,8 @@ def _seed_for_candidate(
     candidate: Mapping[str, Any],
     seeds: Sequence[dict[str, Any]],
     random_seed: int,
+    *,
+    fallback: bool = False,
 ) -> dict[str, Any]:
     objective = candidate.get("task_spec", {}).get("objective_type")
     matching = [
@@ -1045,9 +1094,12 @@ def _seed_for_candidate(
         and seed["task_spec_template"].get("objective_type") == objective
     ]
     if not matching:
-        matching = [dict(seed) for seed in DEFAULT_SEEDS if seed["task_spec_template"]["objective_type"] == objective]
-    if not matching:
+        if fallback:
+            matching = [dict(seed) for seed in DEFAULT_SEEDS if seed["task_spec_template"]["objective_type"] == objective]
+    if not matching and fallback:
         matching = [dict(DEFAULT_SEEDS[0])]
+    if not matching:
+        raise ValueError(f"no seed matches objective_type={objective!r}")
     matching.sort(key=lambda value: str(value.get("seed_id", "")))
     offset = int(stable_id("seed_choice", random_seed, candidate.get("graph_id"), length=8).split("_")[1], 16)
     return dict(matching[offset % len(matching)])
@@ -1072,10 +1124,12 @@ def stage_query_realization(
     constructor = _role_client(layout, config, "query_realization", shard_id, "constructor")
     auditor = _role_client(layout, config, "query_realization", shard_id, "auditor")
     seeds = load_seed_bank(config["query_realization"].get("seed_file"))
+    if config.get("training", {}).get("seed_fallback") and config["query_realization"].get("seed_file"):
+        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS)
     invalid_seeds = [seed.get("seed_id") for seed in seeds if not isinstance(seed.get("task_spec_template"), dict)]
     if invalid_seeds:
         raise ValueError(
-            "v2 custom seeds must include task_spec_template to avoid per-shard reparsing; missing for: "
+            "custom seeds must include task_spec_template to avoid per-shard reparsing; missing for: "
             + ", ".join(str(value) for value in invalid_seeds[:20])
         )
     evaluation = load_evaluation_questions(
@@ -1089,8 +1143,15 @@ def stage_query_realization(
     counts = defaultdict(int)
 
     def realize(candidate: dict[str, Any]):
-        seed = _seed_for_candidate(candidate, seeds, int(config["run"]["random_seed"]))
+        try:
+            seed = candidate.get("seed") or _seed_for_candidate(candidate, seeds, int(config["run"]["random_seed"]), fallback=config.get("version") == 2)
+        except ValueError as exc:
+            return None, {"reason": str(exc), "graph_id": candidate.get("graph_id")}, False
         evidence = list(candidate.get("evidence", []))
+        if config.get("version") == 3 and any((available := published_date(fact.get("source_metadata") or {}, config["input"]["available_at_field"])) and available > cutoff for fact in evidence):
+            return None, {"reason": "evidence available after cutoff", "graph_id": candidate.get("graph_id")}, False
+        if config.get("version") == 3 and seed["task_spec_template"]["time_sensitive"] and any(not published_date(fact.get("source_metadata") or {}, config["input"]["available_at_field"]) for fact in evidence):
+            return None, {"reason": "time-sensitive evidence has no available_at date", "graph_id": candidate.get("graph_id")}, False
         try:
             response = constructor.complete_json(
                 system=QUERY_SYSTEM,
@@ -1109,7 +1170,7 @@ def stage_query_realization(
                 "question": question.strip(),
                 "answer": candidate["answer"],
                 "cutoff": cutoff,
-                "task_spec": candidate["task_spec"],
+                "task_spec": {**candidate["task_spec"], "time_sensitive": bool(seed["task_spec_template"]["time_sensitive"]), "reasoning_form": seed["task_spec_template"]["reasoning_form"]},
                 "seed": seed,
                 "evidence_ids": candidate["evidence_ids"],
                 "evidence_graph": candidate["evidence_graph"],
@@ -1137,6 +1198,7 @@ def stage_query_realization(
                 "formula_version": candidate.get("formula_version"),
                 "canonical_entity_id": candidate.get("canonical_entity_id"),
             }
+            task["financial_topic"] = financial_topic(task)
             fact_index = {fact["fact_id"]: fact for fact in evidence}
             from .replay import replay_graph
 
@@ -1278,6 +1340,112 @@ def stage_validation(
     return {**dict(counts), "validation_failure_ratio": ratio}
 
 
+def stage_corpus_index(
+    layout: RunLayout,
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    shard_id: int,
+    output: Path,
+) -> dict[str, Any]:
+    del shard_id
+    count = int(stage_by_name(plan, "facts")["shard_count"])
+    paths = [layout.shard("facts", value) / "chunks.parquet" for value in range(count)]
+    return build_corpus_index(
+        paths, output / "snapshot.sqlite3",
+        cutoff=str(config["run"]["cutoff"]),
+        batch_rows=int(config["reader"]["batch_rows"]),
+        available_at_field=str(config["input"]["available_at_field"]),
+    )
+
+
+def stage_retrieval_index(
+    layout: RunLayout,
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    shard_id: int,
+    output: Path,
+) -> dict[str, Any]:
+    del plan
+    return build_entity_partition(
+        layout.shard("corpus_index", 0) / "snapshot.sqlite3",
+        layout.shard("repartition", shard_id) / "facts.parquet",
+        output / "snapshot.sqlite3",
+        batch_rows=int(config["reader"]["batch_rows"]),
+    )
+
+
+def stage_sft_prepare(
+    layout: RunLayout,
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    shard_id: int,
+    output: Path,
+) -> dict[str, Any]:
+    del plan
+    task_path = layout.shard("validation", shard_id) / "tasks.parquet"
+    teacher = (
+        _role_client(layout, config, "sft_prepare", shard_id, str(config["training"]["teacher_role"]))
+        if config["training"]["long_enabled"] else None
+    )
+    counts: dict[str, int] = defaultdict(int)
+    streams = {
+        name: (output / f"{name}.jsonl").open("w", encoding="utf-8", newline="\n")
+        for name in ("atomic", "long", "sidecar", "rejected")
+    }
+    try:
+        for task in iter_payloads(task_path, batch_rows=int(config["reader"]["batch_rows"])):
+            counts["input_tasks"] += 1
+            if not selected(task, config):
+                counts["filtered"] += 1
+                continue
+            task_id = str(task["task_id"])
+            family = "atomic" if task["task_type"] == "atomic" else "long"
+            try:
+                if family == "atomic":
+                    sample = atomic_messages(task)
+                    reason = "accepted"
+                else:
+                    sample = None
+                    reason = "no rollout accepted"
+                    assert teacher is not None
+                    bucket = entity_bucket(str(task.get("canonical_entity_id") or ""), int(config["dag"]["entity_buckets"]))
+                    index_path = layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
+                    for _ in range(int(config["training"]["rollouts_per_task"])):
+                        sample, reason = long_rollout(task, teacher, index_path, config)
+                        counts["rollouts"] += 1
+                        if sample is not None:
+                            break
+                if sample is None:
+                    counts["rejected"] += 1
+                    streams["rejected"].write(json.dumps({"task_id": task_id, "reason": reason}, ensure_ascii=False) + "\n")
+                    continue
+                sample["messages"][0]["loss"] = False
+                sample["messages"][1]["loss"] = False
+                split = split_for_task(task_id, float(config["training"]["split_validation_fraction"]))
+                sample["_split"] = split
+                streams[family].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+                sidecar = {
+                    "task_id": task_id, "task_type": task["task_type"], "split": split,
+                    "capability": task.get("capability"), "financial_topic": financial_topic(task),
+                    "objective_type": task.get("task_spec", {}).get("objective_type"),
+                    "formula_id": task.get("formula_id"), "seed_id": task.get("seed", {}).get("seed_id"),
+                    "evidence_ids": task.get("evidence_ids"), "source_pack": task.get("source_pack"),
+                    "answer": task.get("answer"), "cutoff": task.get("cutoff"),
+                    "evidence_graph": task.get("evidence_graph"),
+                    "verification": task.get("verification"), "semantic_audit": task.get("semantic_audit"),
+                }
+                streams["sidecar"].write(json.dumps(sidecar, ensure_ascii=False, separators=(",", ":")) + "\n")
+                counts[f"{family}_accepted"] += 1
+                counts[f"{family}_{split}"] += 1
+            except Exception as exc:
+                counts["rejected"] += 1
+                streams["rejected"].write(json.dumps({"task_id": task_id, "reason": str(exc)}, ensure_ascii=False) + "\n")
+    finally:
+        for stream in streams.values():
+            stream.close()
+    return {**counts, "llm": {"teacher": _client_stats(teacher)}}
+
+
 def _success_metrics(layout: RunLayout, stage: str, count: int) -> list[dict[str, Any]]:
     return [read_json(layout.success(stage, shard_id)).get("metrics", {}) for shard_id in range(count)]
 
@@ -1343,6 +1511,16 @@ def stage_export(
 ) -> dict[str, Any]:
     del shard_id
     quality = _enforce_global_quality(layout, config, plan)
+    if config.get("version") == 3:
+        prepared_metrics = _success_metrics(layout, "sft_prepare", int(stage_by_name(plan, "sft_prepare")["shard_count"]))
+        for family, enabled_key, minimum_key in (
+            ("atomic", "atomic_enabled", "min_atomic_samples"),
+            ("long", "long_enabled", "min_long_samples"),
+        ):
+            available = sum(int(metric.get(f"{family}_train", 0)) for metric in prepared_metrics)
+            required = int(config["training"][minimum_key])
+            if config["training"][enabled_key] and available < required:
+                raise RuntimeError(f"SFT publication blocked: {family} has {available} accepted training samples; requires {required}")
     validation_count = int(stage_by_name(plan, "validation")["shard_count"])
     paths = [layout.shard("validation", value) / "tasks.parquet" for value in range(validation_count)]
     paths = [path for path in paths if path.is_file() and parquet_num_rows(path) > 0]
@@ -1371,13 +1549,50 @@ def stage_export(
             jsonl_stream.flush()
             os.fsync(jsonl_stream.fileno())
             jsonl_stream.close()
+    sft_counts: dict[str, int] = defaultdict(int)
+    if config.get("version") == 3:
+        root = output / "sft"
+        root.mkdir()
+        prepared_count = int(stage_by_name(plan, "sft_prepare")["shard_count"])
+        streams = {
+            (family, split): (root / f"{family}-{split}.jsonl").open("w", encoding="utf-8", newline="\n")
+            for family in ("atomic", "long") for split in ("train", "val")
+        }
+        sidecar = (root / "audit-sidecar.jsonl").open("w", encoding="utf-8", newline="\n")
+        try:
+            for prepared_shard in range(prepared_count):
+                prepared = layout.shard("sft_prepare", prepared_shard)
+                for family in ("atomic", "long"):
+                    with (prepared / f"{family}.jsonl").open("r", encoding="utf-8") as source:
+                        for line in source:
+                            sample = json.loads(line)
+                            split = sample.pop("_split")
+                            streams[(family, split)].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+                            sft_counts[family] += 1
+                            sft_counts[f"{family}_{split}"] += 1
+                with (prepared / "sidecar.jsonl").open("r", encoding="utf-8") as source:
+                    shutil.copyfileobj(source, sidecar)
+        finally:
+            for stream in [*streams.values(), sidecar]:
+                stream.flush()
+                os.fsync(stream.fileno())
+                stream.close()
+        for family, enabled_key, minimum_key in (
+            ("atomic", "atomic_enabled", "min_atomic_samples"),
+            ("long", "long_enabled", "min_long_samples"),
+        ):
+            required = max(1, int(config["training"][minimum_key]))
+            available = sft_counts[f"{family}_train"]
+            if config["training"][enabled_key] and available < required:
+                raise RuntimeError(f"SFT publication blocked: {family} has {available} accepted training samples; requires {required}")
+        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts), "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl"})
     atomic_json(output / "quality_summary.json", quality)
     artifact_inventory: list[dict[str, Any]] = []
     for path in sorted(output.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(output)
-        if path.name not in {"dataset.jsonl", "quality_summary.json"} and relative.parts[0] != "dataset":
+        if path.name not in {"dataset.jsonl", "quality_summary.json"} and relative.parts[0] not in {"dataset", "sft"}:
             continue
         artifact: dict[str, Any] = {"path": relative.as_posix(), "bytes": path.stat().st_size}
         if config["output"].get("artifact_checksums", True):
@@ -1387,7 +1602,7 @@ def stage_export(
         output / "artifact_manifest.json",
         {"created_at": utc_now(), "artifacts": artifact_inventory},
     )
-    return {**quality, "exported_tasks": exported, "formats": sorted(formats)}
+    return {**quality, "exported_tasks": exported, "formats": sorted(formats), "sft": dict(sft_counts)}
 
 
 HANDLERS: dict[str, StageHandler] = {
@@ -1401,6 +1616,9 @@ HANDLERS: dict[str, StageHandler] = {
     "graph_planning": stage_graph_planning,
     "query_realization": stage_query_realization,
     "validation": stage_validation,
+    "corpus_index": stage_corpus_index,
+    "retrieval_index": stage_retrieval_index,
+    "sft_prepare": stage_sft_prepare,
     "export": stage_export,
 }
 

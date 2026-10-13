@@ -3,7 +3,7 @@ set -euo pipefail
 
 stage="${1:?usage: run_stage.sh <stage>}"
 case "$stage" in
-  normalize|id_validation|dedup|facts|atomic|entity_resolution|repartition|graph_planning|query_realization|validation|export)
+  normalize|id_validation|dedup|facts|atomic|entity_resolution|repartition|graph_planning|query_realization|validation|corpus_index|retrieval_index|sft_prepare|export)
     ;;
   *)
     echo "mint-synth: unsupported stage: $stage" >&2

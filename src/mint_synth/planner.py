@@ -34,6 +34,9 @@ STAGE_ORDER = (
     "graph_planning",
     "query_realization",
     "validation",
+    "corpus_index",
+    "retrieval_index",
+    "sft_prepare",
     "export",
 )
 
@@ -79,8 +82,14 @@ def _stage_plan(config: Mapping[str, Any], normalize_count: int) -> list[dict[st
             dependencies.append("query_realization")
             counts.append(entity_buckets)
         add("validation", max(counts or [1]), dependencies)
+    if config.get("version") == 3:
+        if config["training"]["long_enabled"]:
+            add("corpus_index", 1, ["facts"])
+            add("retrieval_index", entity_buckets, ["corpus_index", "repartition"])
+        dependencies = ["validation", "retrieval_index"] if config["training"]["long_enabled"] else ["validation"]
+        add("sft_prepare", next(int(stage["shard_count"]) for stage in active if stage["name"] == "validation"), dependencies)
     if stages.get("export"):
-        add("export", 1, ["validation"])
+        add("export", 1, ["sft_prepare"] if config.get("version") == 3 else ["validation"])
     return active
 
 
@@ -144,6 +153,30 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
             raise ValueError(f"seed {seed.get('seed_id', index)!r} requires non-empty required_fact_roles")
         if not isinstance(template.get("time_sensitive"), bool):
             raise ValueError(f"seed {seed.get('seed_id', index)!r} requires boolean time_sensitive")
+    if config.get("version") == 3:
+        training = config["training"]
+        missing_seeds = set(training["seed_ids"]) - seed_ids
+        if missing_seeds:
+            raise ValueError(f"training.seed_ids contains unknown seeds: {sorted(missing_seeds)}")
+        missing_formulas = set(training["formula_ids"]) - {formula.formula_id for formula in formulas}
+        if missing_formulas:
+            raise ValueError(f"training.formula_ids contains unknown formulas: {sorted(missing_formulas)}")
+        selected_seeds = [seed for seed in seeds if not training["seed_ids"] or seed["seed_id"] in training["seed_ids"]]
+        selected_seeds = [seed for seed in selected_seeds if not training["objective_types"] or seed["task_spec_template"]["objective_type"] in training["objective_types"]]
+        if training["long_enabled"] and not selected_seeds:
+            raise ValueError("no long-horizon seed remains after training selectors")
+        objective_by_generator = {
+            "temporal_pair": "change", "compatible_ratio": "ratio",
+            "compatible_average": "aggregation", "compatible_verification": "verification",
+            "temporal_trend": "change", "ratio_change": "change", "multi_verification": "verification",
+        }
+        enabled_objectives = {
+            objective_by_generator.get(formula.generator)
+            for formula in enabled_formulas
+            if not training["formula_ids"] or formula.formula_id in training["formula_ids"]
+        }
+        if training["long_enabled"] and not any(seed["task_spec_template"]["objective_type"] in enabled_objectives for seed in selected_seeds):
+            raise ValueError("selected long-horizon seeds have no enabled matching formula")
     evaluation = load_evaluation_questions(
         config["quality"].get("evaluation_file"),
         max_questions=int(config["quality"]["max_evaluation_questions"]),
@@ -186,7 +219,7 @@ def create_plan(config_path: str | Path) -> RunLayout:
     layout.root.mkdir(parents=False, exist_ok=False)
 
     plan = {
-        "version": 2,
+        "version": config["version"],
         "run_id": run_id,
         "created_at": utc_now(),
         "run_fingerprint": combined,
@@ -224,7 +257,7 @@ def create_plan(config_path: str | Path) -> RunLayout:
         atomic_json(
             layout.manifest,
             {
-                "version": 2,
+                "version": config["version"],
                 "run_id": run_id,
                 "state": "PLANNED",
                 "created_at": utc_now(),
@@ -442,4 +475,24 @@ def migrate_v1(input_path: str | Path, output_path: str | Path) -> Path:
         }
     )
     dump_config(template, target)
+    return target
+
+
+def migrate_v2(input_path: str | Path, output_path: str | Path, *, cutoff: str | None = None) -> Path:
+    """Write a v3 SFT configuration; previously planned v2 runs remain readable."""
+    config = load_config(input_path)
+    if config["version"] != 2:
+        raise ValueError("migrate-v2 requires a version 2 configuration")
+    new_cutoff = cutoff or config["run"].get("cutoff")
+    if not new_cutoff:
+        raise ValueError("migrate-v2 requires --cutoff when the v2 configuration has no cutoff")
+    config["version"] = 3
+    config["run"]["cutoff"] = new_cutoff
+    config["run"]["fingerprint_mode"] = "sha256"
+    metadata = config["input"]["metadata_fields"]
+    if "published_at" not in metadata:
+        metadata.append("published_at")
+    config = materialize_defaults(config)
+    target = Path(output_path).resolve()
+    dump_config(config, target)
     return target

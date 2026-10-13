@@ -1,10 +1,10 @@
-version: 2
+version: 3
 
 run:
   name: finance-synthesis
   work_dir: ../work
   random_seed: 42
-  fingerprint_mode: metadata
+  fingerprint_mode: sha256
   cutoff: "2026-09-29"
 
 input:
@@ -17,6 +17,7 @@ input:
   max_text_chars: 20000000
   max_jsonl_line_bytes: 67108864
   id_field: null
+  available_at_field: published_at
   metadata_fields: [title, published_at, url, ticker, lei, cik]
   invalid_record_policy: quarantine
 
@@ -75,6 +76,24 @@ chunking: {max_chars: 6000, overlap_chars: 400, min_chars: 600}
 extraction: {max_facts_per_chunk: 30, max_entity_chars: 256, max_metric_chars: 256, max_period_chars: 64}
 atomic: {enabled: true, tasks_per_chunk: 2, language: auto}
 query_realization: {seed_file: null, language: auto, max_question_chars: 1000}
+
+training:
+  enabled: true
+  atomic_enabled: true
+  long_enabled: true
+  teacher_role: constructor
+  rollouts_per_task: 2
+  max_tool_steps: 16
+  max_context_chars: 24000
+  split_validation_fraction: 0.05
+  min_atomic_samples: 1
+  min_long_samples: 1
+  capabilities: []
+  financial_topics: []
+  objective_types: []
+  formula_ids: []
+  seed_ids: []
+  seed_fallback: false
 
 entity_resolution:
   alias_file: null
