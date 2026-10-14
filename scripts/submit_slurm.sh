@@ -2,25 +2,21 @@
 set -euo pipefail
 
 if (( $# < 1 )); then
-  echo "usage: bash scripts/submit_slurm.sh <config.yaml|planned-run-dir> [--dry-run]" >&2
+  echo "usage: bash scripts/submit_slurm.sh <planned-run-dir> [sbatch options...]" >&2
   exit 64
 fi
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-source_path="$1"
+run_dir="$1"
 shift
-mint_synth_bin="${MINT_SYNTH_BIN:-mint-synth}"
-
-if [[ -d "$source_path" ]]; then
-  source_args=(--run-dir "$source_path")
-elif [[ -f "$source_path" ]]; then
-  source_args=(--config "$source_path")
-else
-  echo "mint-synth: config or planned run does not exist: $source_path" >&2
+if [[ ! -f "$run_dir/plan.json" ]]; then
+  echo "mint-synth: plan.json was not found: $run_dir" >&2
   exit 66
 fi
+run_dir="$(cd -- "$run_dir" && pwd -P)"
 
-exec "$mint_synth_bin" submit \
-  "${source_args[@]}" \
-  --sbatch-dir "$repo_root/slurm" \
-  "$@"
+exec sbatch --parsable \
+  --chdir="$repo_root" \
+  --output="$run_dir/logs/slurm-%j.out" \
+  --error="$run_dir/logs/slurm-%j.err" \
+  "$@" "$repo_root/slurm/mint-synth.sbatch" "$run_dir"

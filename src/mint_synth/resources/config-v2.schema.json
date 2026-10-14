@@ -4,7 +4,7 @@
   "title": "mint-synth v2 configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "run", "input", "output", "slurm", "llm"],
+  "required": ["version", "run", "input", "output", "llm"],
   "properties": {
     "version": {"const": 2},
     "run": {

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mint-synth"
 version = "3.0.0"
-description = "Production, provenance-first financial data synthesis for SLURM clusters"
+description = "Provenance-first financial data synthesis for local and cluster runs"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = {text = "MIT"}

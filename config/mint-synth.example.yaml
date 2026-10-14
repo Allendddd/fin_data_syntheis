@@ -28,21 +28,6 @@ output:
   export_formats: [parquet, jsonl]
   artifact_checksums: true
 
-slurm:
-  # 使用 scripts/submit_slurm.sh 时，分区、账号、QOS、CPU、内存和时限以 slurm/*.sbatch 为准。
-  # 下列 account/partition/qos/extra_sbatch_args/stage_resources 仅供旧的动态生成模式使用。
-  account: null
-  partition: compute
-  qos: null
-  apptainer_image: ../deploy/mint-synth.sif
-  image_fingerprint_mode: sha256
-  bind_paths: [../data, ../work, ../outputs]
-  max_parallel_tasks: 64
-  max_array_tasks: 1000
-  extra_sbatch_args: []
-  # 直接 sbatch 模式的资源写在 slurm/*.sbatch；旧的动态生成模式仍可在这里逐阶段覆盖。
-  stage_resources: {}
-
 llm:
   endpoints:
     inference:
@@ -56,6 +41,7 @@ llm:
     constructor: {endpoint: inference, model: finance-constructor, revision: model-build-202609, temperature: 0.3}
     auditor: {endpoint: inference, model: finance-auditor, revision: model-build-202609, temperature: 0.0}
     entity_resolver: {endpoint: inference, model: finance-resolver, revision: model-build-202609, temperature: 0.0}
+    teacher: {endpoint: inference, model: strong-finance-teacher, revision: teacher-build-202609, temperature: 0.2}
   timeout_seconds: 120
   retries: 4
   backoff_seconds: 1
@@ -76,12 +62,13 @@ chunking: {max_chars: 6000, overlap_chars: 400, min_chars: 600}
 extraction: {max_facts_per_chunk: 30, max_entity_chars: 256, max_metric_chars: 256, max_period_chars: 64}
 atomic: {enabled: true, tasks_per_chunk: 2, language: auto}
 query_realization: {seed_file: null, language: auto, max_question_chars: 1000}
+query_export: {enabled: true, min_train_queries: 1}
 
 training:
   enabled: true
   atomic_enabled: true
   long_enabled: true
-  teacher_role: constructor
+  teacher_role: teacher
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000

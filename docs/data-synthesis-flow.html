@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>mint-synth：一条数据如何被合成</title>
+  <style>
+    :root {
+      --bg: #08111f;
+      --panel: #101d30;
+      --panel-2: #14243a;
+      --line: #2b405b;
+      --text: #e9f1fb;
+      --muted: #9db0c7;
+      --blue: #55a7ff;
+      --cyan: #43d3c7;
+      --amber: #f5bb55;
+      --purple: #b995ff;
+      --green: #72d99a;
+      --red: #ff7c8a;
+      --shadow: 0 18px 55px rgba(0, 0, 0, .28);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; overflow-x: clip; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% -10%, rgba(85, 167, 255, .18), transparent 35%),
+        radial-gradient(circle at 90% 0%, rgba(67, 211, 199, .12), transparent 30%),
+        var(--bg);
+      font: 15px/1.65 Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      overflow-x: clip;
+    }
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+    code { color: #b9e7ff; }
+    .wrap { width: min(1180px, calc(100% - 36px)); margin: 0 auto; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(157, 176, 199, .16);
+      background: rgba(8, 17, 31, .86);
+      backdrop-filter: blur(16px);
+    }
+    .topbar .wrap {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .brand { font-weight: 800; letter-spacing: .02em; }
+    nav { display: flex; gap: 18px; flex-wrap: wrap; }
+    nav a { color: var(--muted); font-size: 13px; }
+    .hero { padding: 70px 0 42px; }
+    .eyebrow {
+      color: var(--cyan);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 900px;
+      margin: 10px 0 18px;
+      font-size: clamp(36px, 6vw, 70px);
+      line-height: 1.08;
+      letter-spacing: -.045em;
+      overflow-wrap: anywhere;
+    }
+    .lead { max-width: 840px; color: var(--muted); font-size: 18px; overflow-wrap: anywhere; }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+    .metric, .card, .stage, .branch, .note, details {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(20, 36, 58, .94), rgba(12, 25, 42, .94));
+      box-shadow: var(--shadow);
+    }
+    .metric { padding: 18px; border-radius: 14px; }
+    .metric strong { display: block; font-size: 22px; color: var(--blue); }
+    .metric span { color: var(--muted); font-size: 12px; }
+    section { padding: 32px 0; }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 20px;
+    }
+    h2 { margin: 0; font-size: clamp(25px, 4vw, 38px); letter-spacing: -.025em; text-wrap: balance; }
+    h3 { margin: 0 0 8px; font-size: 17px; }
+    p { margin: 7px 0; }
+    .section-head p { max-width: 620px; color: var(--muted); }
+    .callout {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 18px 20px;
+      border: 1px solid rgba(245, 187, 85, .35);
+      border-radius: 14px;
+      background: rgba(245, 187, 85, .08);
+    }
+    .callout .icon { font-size: 22px; }
+    .callout strong { color: var(--amber); }
+    .sample-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .card { border-radius: var(--radius); padding: 22px; min-width: 0; }
+    pre {
+      margin: 12px 0 0;
+      padding: 16px;
+      overflow: auto;
+      border-radius: 12px;
+      color: #d8eaff;
+      background: #07101c;
+      border: 1px solid #20344c;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(145px, 1fr));
+      gap: 24px;
+      overflow-x: auto;
+      padding: 12px 4px 26px;
+    }
+    .stage {
+      position: relative;
+      min-height: 184px;
+      padding: 17px;
+      border-radius: 15px;
+      box-shadow: none;
+    }
+    .stage:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -21px;
+      top: 72px;
+      color: var(--blue);
+      font-size: 22px;
+      font-weight: 800;
+    }
+    .number {
+      display: inline-grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 9px;
+      color: #06111e;
+      background: var(--blue);
+      font-weight: 900;
+      font-size: 13px;
+    }
+    .stage h3 { margin-top: 13px; }
+    .stage p { color: var(--muted); font-size: 13px; }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    .pill {
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(85, 167, 255, .12);
+      border: 1px solid rgba(85, 167, 255, .28);
+      color: #b9dcff;
+      font-size: 11px;
+    }
+    .branches { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .branch { border-radius: var(--radius); overflow: hidden; }
+    .branch-head { padding: 22px 24px 14px; border-bottom: 1px solid var(--line); }
+    .branch.atomic .branch-head { background: rgba(85, 167, 255, .09); }
+    .branch.long .branch-head { background: rgba(185, 149, 255, .09); }
+    .branch-head p { color: var(--muted); }
+    .branch-body { padding: 18px 24px 24px; }
+    .mini-flow { display: grid; gap: 9px; }
+    .mini-step {
+      display: grid;
+      grid-template-columns: 32px 1fr;
+      gap: 11px;
+      align-items: start;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(7, 16, 28, .45);
+    }
+    .mini-step b:first-child { color: var(--cyan); }
+    .mini-step small { display: block; color: var(--muted); margin-top: 2px; }
+    .merge {
+      margin: 14px 0;
+      padding: 12px;
+      text-align: center;
+      border: 1px dashed rgba(185, 149, 255, .5);
+      border-radius: 11px;
+      color: #d7c4ff;
+      background: rgba(185, 149, 255, .08);
+    }
+    .dag {
+      display: grid;
+      grid-template-columns: 1.2fr auto 1fr auto .8fr;
+      align-items: center;
+      gap: 11px;
+      padding: 22px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: #0a1626;
+      overflow-x: auto;
+    }
+    .dag-col { display: grid; gap: 9px; }
+    .node {
+      min-width: 150px;
+      padding: 11px 13px;
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      font-size: 12px;
+    }
+    .node.fact { border-color: rgba(67, 211, 199, .5); }
+    .node.op { border-color: rgba(185, 149, 255, .55); }
+    .node.answer { border-color: rgba(114, 217, 154, .55); }
+    .arrow { color: var(--purple); font-size: 25px; text-align: center; }
+    .trace {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 8px;
+      overflow-x: auto;
+    }
+    .trace-item { padding: 14px; border-radius: 11px; background: var(--panel); border: 1px solid var(--line); }
+    .trace-item strong { color: var(--cyan); display: block; }
+    .trace-item small { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+    th, td { padding: 13px 15px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); background: #0b1727; font-size: 12px; letter-spacing: .04em; }
+    tr:last-child td { border-bottom: 0; }
+    .ok { color: var(--green); }
+    .bad { color: var(--red); }
+    details { border-radius: 13px; margin: 10px 0; box-shadow: none; }
+    summary { cursor: pointer; padding: 15px 17px; font-weight: 750; }
+    details > div { padding: 0 17px 17px; color: var(--muted); }
+    footer { padding: 44px 0 64px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 900px) {
+      .hero-grid { grid-template-columns: 1fr 1fr; }
+      .sample-grid, .branches { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: repeat(6, 220px); }
+      .section-head { display: block; }
+      .dag { grid-template-columns: 210px 35px 190px 35px 170px; }
+    }
+    @media (max-width: 560px) {
+      .wrap { width: min(100% - 24px, 1180px); }
+      .hero { padding-top: 44px; }
+      h1 { font-size: 34px; line-height: 1.16; }
+      .hero-grid { grid-template-columns: 1fr; }
+      nav a:not(:last-child) { display: none; }
+      .card, .branch-head, .branch-body { padding-left: 17px; padding-right: 17px; }
+    }
+    @media print {
+      :root { --bg: #fff; --panel: #fff; --panel-2: #f6f8fb; --line: #ccd5df; --text: #17202a; --muted: #51606f; }
+      body { background: #fff; }
+      .topbar { position: static; background: #fff; }
+      .metric, .card, .stage, .branch, details { box-shadow: none; }
+      section { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <div class="brand">mint-synth / 数据合成流程</div>
+      <nav aria-label="页面导航">
+        <a href="#lifecycle">单条记录</a>
+        <a href="#branches">两条产线</a>
+        <a href="#quality">质量门</a>
+        <a href="project-architecture.html">项目架构 →</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="wrap">
+        <div class="eyebrow">Record to auditable task</div>
+        <h1>一条原始数据，如何变成可回放的金融训练任务</h1>
+        <p class="lead">从 JSONL/Parquet 的一行开始，先建立稳定来源定位，再抽取事实。atomic 任务在本地 chunk 内构造；long-horizon 任务把同一金融实体的多份来源汇合成答案 DAG，回放答案后才生成自然语言问题。</p>
+        <div class="hero-grid">
+          <div class="metric"><strong>0 → N</strong><span>一条输入可能产生零个或多个任务</span></div>
+          <div class="metric"><strong>6,000</strong><span>默认单 chunk 最大字符数</span></div>
+          <div class="metric"><strong>≥ 2</strong><span>长链任务默认独立来源数</span></div>
+          <div class="metric"><strong>2–3</strong><span>当前默认成品 DAG 的实际深度</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="callout">
+          <div class="icon">◎</div>
+          <div><strong>先明确“单条数据”的含义。</strong>它是一条带 <code>text</code> 的输入记录，是追踪和抽取的起点，不是最终样本的固定单位。无有效事实时产出为 0；一个 chunk 可以产生多条 atomic 任务；一条记录中的事实也可以参与多个 long-horizon 图。</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Shared front half</div><h2>所有任务共用的前半程</h2></div>
+          <p>这部分先解决输入是否可信、能否定位、是否重复，以及哪些句子可以成为后续推理的事实叶节点。</p>
+        </div>
+
+        <div class="sample-grid">
+          <article class="card">
+            <h3>示意输入：JSONL 中的一行</h3>
+            <pre>{
+  "id": "report-a-2025",
+  "text": "A 公司 2025 年营业收入为 120 亿元，\n同比增长 20%。",
+  "title": "A 公司 2025 年年报",
+  "published_at": "2026-03-20",
+  "ticker": "000001"
+}</pre>
+            <p><small>此例假设配置了 <code>input.id_field: id</code>，并把 title、published_at、ticker 列入 <code>metadata_fields</code>。</small></p>
+          </article>
+          <article class="card">
+            <h3>规范化后保留的主干字段</h3>
+            <pre>{
+  "record_id": "稳定 ID",
+  "content_hash": "正文 SHA-256",
+  "text": "原始正文",
+  "source_uri": "文件绝对路径",
+  "source_locator_json": "行号/字节区间",
+  "external_id": "report-a-2025",
+  "metadata_json": "title/ticker/...",
+  "shuffle_partition": 17
+}</pre>
+          </article>
+        </div>
+
+        <div class="flow" aria-label="共享数据处理流程">
+          <article class="stage">
+            <span class="number">1</span>
+            <h3>Catalog</h3>
+            <p>递归发现 JSONL/Parquet。JSONL 按字节范围规划，Parquet 按 row group 规划。</p>
+            <div class="pill-row"><span class="pill">input manifest</span><span class="pill">assignment</span></div>
+          </article>
+          <article class="stage">
+            <span class="number">2</span>
+            <h3>Normalize</h3>
+            <p>校验 object 与 text，形成稳定 ID、正文哈希、来源定位和物理分区键。</p>
+            <div class="pill-row"><span class="pill">data.parquet</span><span class="pill">quarantine</span></div>
+          </article>
+          <article class="stage">
+            <span class="number">3</span>
+            <h3>ID 全局校验</h3>
+            <p>相同 external ID 若对应多个正文哈希，相关记录整体隔离。</p>
+            <div class="pill-row"><span class="pill">conflicts.parquet</span></div>
+          </article>
+          <article class="stage">
+            <span class="number">4</span>
+            <h3>精确去重</h3>
+            <p>按 content hash 全局去重，并剔除已经确认的 ID 冲突。</p>
+            <div class="pill-row"><span class="pill">canonical record</span></div>
+          </article>
+          <article class="stage">
+            <span class="number">5</span>
+            <h3>语义切块</h3>
+            <p>默认 6,000 字符、400 字符重叠；每块保留正文精确字符区间。</p>
+            <div class="pill-row"><span class="pill">chunk_id</span><span class="pill">offsets</span></div>
+          </article>
+          <article class="stage">
+            <span class="number">6</span>
+            <h3>事实抽取</h3>
+            <p>抽取 entity、period、metric、value、单位、币种和逐字 quote，并校验证据位置。</p>
+            <div class="pill-row"><span class="pill">fact_id</span><span class="pill">facts.parquet</span></div>
+          </article>
+        </div>
+
+        <details>
+          <summary>什么情况下这条记录会在前半程被隔离？</summary>
+          <div>缺少或错误类型的 <code>text</code>、正文超过配置上限、JSONL 单行超过字节上限、external ID 与另一正文冲突，或事实抽取结果不能被原文 quote 与字符区间支持。记录级错误进入 <code>quarantine.parquet</code>；系统级 I/O 或输入指纹变化会让 shard 失败。</div>
+        </details>
+      </div>
+    </section>
+
+    <section id="branches">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Two products</div><h2>事实抽取后，分成两条合成产线</h2></div>
+          <p>两条产线共享可定位事实，但上下文形式、组合范围和难度约束不同，最后在 validation 阶段重新汇合。</p>
+        </div>
+
+        <div class="branches">
+          <article class="branch atomic">
+            <div class="branch-head">
+              <h3>Atomic：单 chunk 内的能力任务</h3>
+              <p>用户输入中带原文 context，目标是训练知识、抽取、计算、分析或验证等局部能力。</p>
+            </div>
+            <div class="branch-body">
+              <div class="mini-flow">
+                <div class="mini-step"><b>A1</b><div><b>选择 chunk 与本块 facts</b><small>默认每个 chunk 尝试构造 2 条任务，能力类型按稳定规则轮换。</small></div></div>
+                <div class="mini-step"><b>A2</b><div><b>Constructor 生成候选</b><small>输出 question、answer、evidence_ids、evidence_graph 和 reasoning_trace。</small></div></div>
+                <div class="mini-step"><b>A3</b><div><b>本地预回放</b><small>图必须只引用已抽取 fact_id，运算结果必须可由 Decimal 执行。</small></div></div>
+                <div class="mini-step"><b>A4</b><div><b>独立 Auditor</b><small>检查答案是否被证据支持、问题是否清楚、推理是否泄漏内部字段。</small></div></div>
+                <div class="mini-step"><b>A5</b><div><b>确定性复核</b><small>重新回放图并校验答案、证据集合、数值维度与推理步骤。</small></div></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="branch long">
+            <div class="branch-head">
+              <h3>Long-horizon：同一实体的多来源任务</h3>
+              <p>问题本身不附原文 context，任务通过 source pack 关联多份证据，并要求先固定答案图。</p>
+            </div>
+            <div class="branch-body">
+              <div class="mini-flow">
+                <div class="mini-step"><b>L1</b><div><b>实体解析</b><small>强标识符 → alias → 规范化名称 → 受约束 LLM fallback。</small></div></div>
+                <div class="mini-step"><b>L2</b><div><b>按 canonical entity 重分区</b><small>同一主体散落在不同文件和原始 shard 的事实被送到同一个 planner。</small></div></div>
+              </div>
+              <div class="merge">本条记录的 facts ＋ 同一实体的其他来源 facts（默认至少 2 个 source_id）</div>
+              <div class="mini-flow">
+                <div class="mini-step"><b>L3</b><div><b>公式规划 DAG</b><small>匹配期间、metric、unit、scale、currency 与来源宽度，构造类型化图。</small></div></div>
+                <div class="mini-step"><b>L4</b><div><b>确定性回放答案</b><small>先计算 terminal，拒绝除零、维度冲突、断开节点和伪深度。</small></div></div>
+                <div class="mini-step"><b>L5</b><div><b>问题实现与审计</b><small>按 seed/task spec 生成自然问题，再由 auditor 与本地门共同验收。</small></div></div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Answer first</div><h2>长链任务的答案 DAG 示例</h2></div>
+          <p>示意为“四事实跨期比率变化”：先计算两个期间的比率，再计算变化幅度。自然语言问题在图通过回放之后才生成。</p>
+        </div>
+        <div class="dag" role="img" aria-label="四个事实节点形成两个比率，两个比率相减后取绝对值形成答案">
+          <div class="dag-col">
+            <div class="node fact"><b>fact_0</b><br>新期间分子 · 来源 A</div>
+            <div class="node fact"><b>fact_1</b><br>新期间分母 · 来源 B</div>
+            <div class="node fact"><b>fact_2</b><br>旧期间分子 · 来源 A</div>
+            <div class="node fact"><b>fact_3</b><br>旧期间分母 · 来源 C</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="dag-col">
+            <div class="node op"><b>new_ratio</b><br>ratio(fact_0, fact_1)</div>
+            <div class="node op"><b>old_ratio</b><br>ratio(fact_2, fact_3)</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="dag-col">
+            <div class="node op"><b>ratio_delta</b><br>subtract(new, old)</div>
+            <div class="node answer"><b>terminal</b><br>abs(ratio_delta)</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Provenance chain</div><h2>从成品可以追溯回原始行</h2></div>
+          <p>这些 ID 逐层固定数据血缘；最终任务中的 evidence_ids 与 terminal 的事实祖先必须完全相等。</p>
+        </div>
+        <div class="trace">
+          <div class="trace-item"><strong>source_uri</strong><small>哪个 JSONL / Parquet 文件</small></div>
+          <div class="trace-item"><strong>source_locator</strong><small>行号、字节区间或 row group / row</small></div>
+          <div class="trace-item"><strong>record_id</strong><small>规范记录与正文哈希</small></div>
+          <div class="trace-item"><strong>chunk_id</strong><small>正文字符起止位置</small></div>
+          <div class="trace-item"><strong>fact_id</strong><small>quote、数值与金融维度</small></div>
+          <div class="trace-item"><strong>graph_id / task_id</strong><small>公式版本、回放轨迹与答案</small></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="quality">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Acceptance gates</div><h2>最后怎样决定“收下”还是“隔离”</h2></div>
+          <p>validation 同时读取 atomic 与 long-horizon 成品，再运行一次本地确定性审计。通过后才能进入 export。</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>检查层</th><th>必须满足</th><th>失败结果</th></tr></thead>
+            <tbody>
+              <tr><td>输入记录</td><td>text 类型/长度正确，来源可定位，输入指纹未变化</td><td class="bad">记录隔离或 shard 失败</td></tr>
+              <tr><td>事实</td><td>quote 在原文中，数值可解析，字段长度受限，字符区间有效</td><td class="bad">fact_rejected</td></tr>
+              <tr><td>证据图</td><td>无环、无断开节点、输入不重复、单位与币种兼容、答案可回放</td><td class="bad">候选图丢弃</td></tr>
+              <tr><td>语义审计</td><td>问题清楚且被证据完整支持，不泄漏答案或内部定位字段</td><td class="bad">quality_rejection</td></tr>
+              <tr><td>最终发布</td><td>全局错误率不越阈值，有效任务数达到下限，全部 shard 完成</td><td class="bad">阻止 export / 发布</td></tr>
+              <tr><td>通过</td><td>Parquet 为规范产物，可选 JSONL；清单记录文件大小与 SHA-256</td><td class="ok">写入 _PUBLISHED.json</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="sample-grid">
+          <article class="card">
+            <h3>Atomic 成品的核心结构</h3>
+            <pre>task_type: atomic
+input: {context, question}
+answer: {value/text, unit, scale, currency}
+evidence_ids: [fact_id, ...]
+evidence_graph: {nodes, terminal_id}
+reasoning_trace: [...]
+semantic_audit: {...}
+verification:
+  accepted: true
+  replay: {depth, fact_ids, source_ids, trace}</pre>
+          </article>
+          <article class="card">
+            <h3>Long-horizon 成品的核心结构</h3>
+            <pre>task_type: long_horizon
+question: "..."
+answer: {...}
+task_spec: {objective_type, fact_roles, ...}
+source_pack: [{source_id, chunk_id, source_uri}, ...]
+evidence_ids: [fact_id, ...]
+evidence_graph: {nodes, terminal_id}
+formula_id / formula_version / graph_id
+semantic_audit: {...}
+verification: {accepted: true, replay: {...}}</pre>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">数据合成流程示意。下一页：<a href="project-architecture.html">项目架构与运行方式</a>。</div>
+  </footer>
+</body>
+</html>

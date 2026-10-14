@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mint-synth：架构与运行方式</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#152238; --line:#34465d; --text:#edf4ff; --muted:#b2c2d6; --blue:#83b9ff; --green:#86dfbd; --gold:#f0cf85; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { max-width:1120px; margin:auto; padding:32px 20px 72px; }
+    a { color:var(--green); }
+    h1 { font-size:clamp(32px,5vw,54px); line-height:1.15; margin:18px 0; }
+    h2 { margin:48px 0 18px; font-size:26px; }
+    h3 { margin:0 0 8px; font-size:18px; }
+    p { margin:8px 0 16px; }
+    .lead,.muted { color:var(--muted); }
+    .lead { max-width:880px; font-size:19px; }
+    .links { display:flex; gap:20px; flex-wrap:wrap; margin:20px 0; }
+    .grid { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .card,.step { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
+    .card strong { color:var(--blue); }
+    .flow { display:flex; align-items:stretch; gap:10px; flex-wrap:wrap; }
+    .step { flex:1 1 180px; }
+    .arrow { align-self:center; color:var(--gold); font-size:25px; }
+    .branch { border-left:4px solid var(--green); padding-left:15px; }
+    .branch.teacher { border-color:var(--gold); }
+    code,pre { font-family:Consolas,"Cascadia Code",monospace; }
+    code { color:var(--green); overflow-wrap:anywhere; }
+    pre { padding:16px; overflow:auto; border:1px solid var(--line); border-radius:12px; background:#070d18; }
+    ul { padding-left:22px; }
+    li { margin:5px 0; }
+    @media(max-width:700px) { .grid { grid-template-columns:1fr; } .arrow { display:none; } .flow { display:grid; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>项目架构与运行方式</h1>
+  <p class="lead">v3 从原始金融语料构造可验证的长程 query。可选的教师数据阶段让强模型在本地冻结的语料快照和工具 harness 中执行 query，并输出 SFT messages。运行入口与调度器分离。</p>
+  <nav class="links">
+    <a href="../README.md">使用说明</a>
+    <a href="methodology.md">构造方法</a>
+    <a href="opd.md">query 数据契约</a>
+    <a href="sft-v3.md">SFT 轨迹</a>
+    <a href="../slurm/README.md">SLURM 提交</a>
+  </nav>
+
+  <h2>运行路径</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>本地机器</h3>
+      <p><code>mint-synth run --config config/production.yaml --workers 1</code></p>
+      <p class="muted">创建冻结计划，依计划顺序执行阶段。在同一阶段内，<code>--workers</code> 控制分片进程数。</p>
+    </div>
+    <div class="card">
+      <h3>SLURM 集群</h3>
+      <p><code>mint-synth plan --config config/production.yaml</code><br>
+      <code>bash scripts/submit_slurm.sh &lt;run_dir&gt; [sbatch options...]</code></p>
+      <p class="muted">提交一个作业。<code>slurm/mint-synth.sbatch</code> 使用计算节点的 Python 调用同一个 <code>run --run-dir</code> 入口；资源和解释器由脚本及环境变量指定。</p>
+    </div>
+  </div>
+  <p>再次调用 <code>run --run-dir &lt;run_dir&gt;</code> 时，运行器根据计划签名与完整性检查跳过已完成分片。运行目录锁避免两个进程同时写入同一计划。</p>
+
+  <h2>v3 数据阶段</h2>
+  <div class="flow" aria-label="主要阶段">
+    <div class="step"><h3>输入整理</h3><p>normalize → ID 校验 → 去重</p></div>
+    <div class="arrow">→</div>
+    <div class="step"><h3>证据构造</h3><p>事实抽取 → 实体解析 → 重分区</p></div>
+    <div class="arrow">→</div>
+    <div class="step"><h3>任务构造</h3><p>evidence DAG → query 实现 → 验证</p></div>
+  </div>
+  <p class="muted">可选的原子任务从事实分支生成，并汇入验证阶段。实际启用的阶段、分片数与依赖关系由计划文件固定。</p>
+  <div class="grid">
+    <div class="card branch">
+      <h3>长程 query 分支</h3>
+      <p>冻结语料索引 → 检索索引 → <code>query_export</code></p>
+      <p>输出只含 <code>query</code> 的 train/val JSONL 和独立的隐藏答案校验文件。该阶段依赖已验证任务与检索索引，可先于教师轨迹完成。</p>
+    </div>
+    <div class="card branch teacher">
+      <h3>教师 SFT 分支，可关闭</h3>
+      <p><code>sft_prepare</code> 让强模型执行 query，使用 <code>search_corpus</code>、<code>open_chunk</code> 与 <code>calculate</code>。轨迹通过证据与答案门控后转换为 <code>messages</code>。</p>
+    </div>
+  </div>
+  <p>最终 <code>export</code> 汇总启用的分支并检查质量门槛，写入发布清单。外部 OPD 流程使用纯 query；本项目不运行学生训练。</p>
+
+  <h2>代码职责</h2>
+  <div class="grid">
+    <div class="card"><h3>core + storage</h3><p>配置与指纹、运行目录、输入读取和规范化。</p></div>
+    <div class="card"><h3>synthesis + inference</h3><p>事实、实体、DAG、query、审计，以及模型角色与请求缓存。</p></div>
+    <div class="card"><h3>harness + sft</h3><p>冻结语料工具、教师执行、轨迹审核和 messages 格式化。</p></div>
+    <div class="card"><h3>workflow</h3><p>计划、阶段处理器、worker、本地运行器、query 导出和发布。</p></div>
+  </div>
+  <p class="muted">SLURM 仅在仓库的一个作业脚本和一个提交脚本中出现。合成 YAML 不包含调度字段。旧 v2 配置仍保留读取能力；旧计划须使用创建它的代码版本继续执行。</p>
+
+  <h2>运行目录</h2>
+  <pre>runs/&lt;run_id&gt;/
+  plan.json                 冻结阶段、依赖与分片签名
+  resolved_config.yaml      展开后的数据配置
+  assignments/              输入分片分配
+  stages/&lt;stage&gt;/shards/    分片产物和 _SUCCESS.json
+  logs/                     分片日志与可选 SLURM 日志
+  exports/manifest.json     最终发布清单
+  _PUBLISHED.json           发布标记</pre>
+  <p>分片在同一文件系统内先写临时目录，再原子提交。LLM 请求缓存支持失败分片恢复；输入、辅助文件和代码指纹阻止错误版本续跑。</p>
+</main>
+</body>
+</html>
