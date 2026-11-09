@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import threading
@@ -29,6 +30,7 @@ class JsonLLM(Protocol):
         user: str,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        sample_key: str | None = None,
     ) -> dict[str, Any] | list[Any]: ...
 
 
@@ -166,6 +168,7 @@ class OpenAICompatibleClient:
         user: str,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        sample_key: str | None = None,
     ) -> dict[str, Any] | list[Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -179,7 +182,9 @@ class OpenAICompatibleClient:
         if self.config.strict_json:
             payload["response_format"] = {"type": "json_object"}
         if self.config.seed is not None:
-            payload["seed"] = self.config.seed
+            payload["seed"] = self.config.seed if sample_key is None else int.from_bytes(
+                hashlib.sha256(f"{self.config.seed}\0{sample_key}".encode("utf-8")).digest()[:4], "big"
+            ) & 0x7FFFFFFF
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.config.api_key:

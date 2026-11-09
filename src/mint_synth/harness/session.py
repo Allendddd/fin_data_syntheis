@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from mint_synth.harness.registry import ToolRegistry, default_tool_registry
 from mint_synth.harness.snapshot import SnapshotTools, published_date
 from mint_synth.harness.state import harness_system, visible_state
-from mint_synth.harness.verifier import _answer_ok
+from mint_synth.harness.verifier import typed_answer_ok, verify_proof
 from mint_synth.core.provenance import sha256_file
 
 
@@ -452,9 +452,26 @@ class HarnessSession:
                     or (self.case.dated_only and row[1] is None)):
                 mismatched.append(chunk_id)
         answer_correct = False
+        derivation_valid = False
+        derivation_reason = "no final answer"
         if self._final:
             try:
-                answer_correct = _answer_ok(self.case.task, self._final, self.answer_tolerance)
+                proof = json.loads(self._final)
+                answer_correct = typed_answer_ok(
+                    self.case.task, proof.get("answer") if isinstance(proof, Mapping) else None,
+                    self.answer_tolerance,
+                )
+                acquired_text = {
+                    chunk_id: str(self._trace[int(record["step"]) - 1]["observation"]["text"])
+                    for chunk_id, record in acquired.items()
+                    if isinstance(self._trace[int(record["step"]) - 1]["observation"], Mapping)
+                    and isinstance(self._trace[int(record["step"]) - 1]["observation"].get("text"), str)
+                }
+                derivation_valid, derivation_reason = verify_proof(
+                    self.case.task, proof, acquired=acquired_text, tolerance=self.answer_tolerance,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                derivation_reason = "final is not a valid JSON proof"
             except Exception as exc:
                 raise RuntimeError("hidden verifier task cannot be replayed") from exc
         evidence_replayable = not missing and not mismatched
@@ -463,7 +480,7 @@ class HarnessSession:
             record.get("available_at") is None or str(record["available_at"]) <= self.case.cutoff
             for record in self._ledger if record.get("kind") == "source_chunk"
         )
-        accepted = bool(self._final) and evidence_replayable and answer_correct and action_valid and cutoff_valid
+        accepted = bool(self._final) and evidence_replayable and derivation_valid and action_valid and cutoff_valid
         reason = (
             "accepted" if accepted else
             "no final answer" if not self._final else
@@ -471,12 +488,13 @@ class HarnessSession:
             "evidence provenance did not replay" if mismatched else
             "invalid action in trajectory" if not action_valid else
             "evidence crossed the cutoff" if not cutoff_valid else
-            "final answer disagrees with replayed gold"
+            derivation_reason
         )
         return {
             "accepted": accepted,
             "reward": int(accepted),
             "answer_correct": answer_correct,
+            "derivation_valid": derivation_valid,
             "evidence_complete": evidence_replayable,
             "evidence_replayable": evidence_replayable,
             "action_valid": action_valid,

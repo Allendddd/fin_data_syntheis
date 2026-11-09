@@ -76,6 +76,29 @@ class RuntimeCacheTests(unittest.TestCase):
             self.assertEqual(delegate.calls, 2)
             client.close()
 
+    def test_sampling_slots_are_distinct_and_replayable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            delegate = Delegate("value")
+            client = ConfiguredRoleClient(
+                delegate,
+                temperature=0.2,
+                max_tokens=None,
+                cache=SqliteResponseCache(
+                    Path(temp) / "responses.sqlite3",
+                    policy="immutable",
+                    busy_timeout_seconds=1,
+                ),
+                cache_namespace={"model": "m"},
+            )
+            first = client.complete_json(system="same", user="same", sample_key="task:1")
+            replay = client.complete_json(system="same", user="same", sample_key="task:1")
+            second = client.complete_json(system="same", user="same", sample_key="task:2")
+            self.assertEqual(first, replay)
+            self.assertEqual(first, second)
+            self.assertEqual(delegate.calls, 2)
+            self.assertEqual(client.stats()["cache_hits"], 1)
+            client.close()
+
 
 if __name__ == "__main__":
     unittest.main()

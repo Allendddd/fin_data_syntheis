@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--stage", required=True)
     worker.add_argument("--shard-id", required=True, type=int)
 
+    trace_proxy = commands.add_parser("trace-proxy", help="Record model API calls through a local HTTP proxy")
+    trace_proxy.add_argument("--upstream", required=True, help="vLLM/SGLang HTTP(S) origin, without /v1")
+    trace_proxy.add_argument("--output-dir", required=True, help="Private directory for raw requests and responses")
+    trace_proxy.add_argument("--run-id", required=True, help="Agent run identifier used to join framework events")
+    trace_proxy.add_argument("--port", type=int, default=8765, help="Loopback listen port (default: 8765)")
+    trace_proxy.add_argument("--max-request-bytes", type=int, default=64 * 1024 * 1024)
+
     return parser
 
 
@@ -111,6 +118,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "worker":
             _json(run_worker(args.run_dir, args.stage, args.shard_id))
+            return 0
+        if args.command == "trace-proxy":
+            from mint_synth.trace_proxy import TraceProxyConfig, serve_trace_proxy
+
+            serve_trace_proxy(TraceProxyConfig(
+                upstream=args.upstream,
+                output_dir=args.output_dir,
+                run_id=args.run_id,
+                port=args.port,
+                max_request_bytes=args.max_request_bytes,
+            ))
             return 0
         parser.error(f"unknown command: {args.command}")
     except (ConfigError, OSError, ValueError, RuntimeError, KeyError) as exc:

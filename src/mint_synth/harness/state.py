@@ -4,6 +4,7 @@ import json
 from typing import Any, Mapping
 
 from mint_synth.harness.snapshot import TOOL_DEFINITIONS, SnapshotTools
+from mint_synth.harness.verifier import PROOF_SCHEMA
 
 
 def _json(value: Any) -> str:
@@ -18,7 +19,10 @@ def harness_system(cutoff: str, tool_names: tuple[str, ...] = ("search_corpus", 
         "chunks, calculate when needed, then give a concise evidence-grounded final answer. "
         f'Allowed tool names: {actions}. Return one JSON object per step: '
         '{"tool":"<allowed tool name>","arguments":{...}} '
-        'or {"final":"answer"}. A tool action may include '
+        'or {"final":"<JSON proof>"}. The final string must be a JSON object with this shape: '
+        f'{_json(PROOF_SCHEMA)}. Use local IDs; cite exact quotes from opened chunks and '
+        'show every necessary operation in dependency order. An empty constants or steps array is allowed. '
+        'A tool action may include '
         '"memory":{"plan":"...","confirmed":["..."],"unresolved":["..."]}; '
         "memory is a scratchpad and never counts as verified evidence."
     )

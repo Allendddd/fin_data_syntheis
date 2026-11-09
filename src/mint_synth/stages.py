@@ -15,7 +15,7 @@ from mint_synth.workflow.stages.questions import (
     stage_query_realization, stage_validation,
 )
 from mint_synth.workflow.stages.indexes import stage_corpus_index, stage_retrieval_index
-from mint_synth.workflow.stages.training import stage_sft_prepare
+from mint_synth.workflow.stages.sft_data import stage_sft_prepare
 from mint_synth.workflow.stages.publication import (
     _enforce_global_quality, _success_metrics, stage_export,
 )

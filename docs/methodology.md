@@ -60,6 +60,8 @@ LLM 输出必须构成输入 surface 的完整、无重叠分区，不能引入�
 6. 从 terminal 的真实祖先计算操作深度和独立来源数。
 7. 对规范图哈希得到稳定 `graph_id`；候选扫描上限与有效 beam width 分离，无效的早期组合不会挤掉后续合法图。
 
+v3 长任务先把分析师种子的目标类型、推导形式与必需事实角色映射到已注册的公式生成器，再以该种子的时间约束筛选事实并规划图。无法映射的自定义规格在运行前拒绝；种子不会替代图深度、来源广度或回放门槛。
+
 深度按 terminal 的真实祖先计算，规则公式不会用 `identity` 或无必要的 `abs` 填充深度。因而默认 `min_depth=2` 会自然排除单次 ratio、average 或 equals；需要这些浅图时必须在配置中明确把最小深度降为 1。
 
 默认深度门是 2–4，但当前内置可执行拓扑的实际深度为 1–3；在默认最小深度下，成品 long-horizon 图实际为 2–3 层。`max_depth=4` 是上限而不是难度承诺，仅提高该值不会生成新拓扑。更深任务必须新增受执行器支持的 generator、公式版本和回放/审计测试，不能只在 YAML 中声明任意算式。
@@ -93,7 +95,7 @@ LLM 输出必须构成输入 surface 的完整、无重叠分区，不能引入�
 
 ## 7. 未公开部分与工程补全
 
-论文未公开原始构造 prompt、模型/解码组合、source-pack mining 算法、`h_min/b_min` 取值、完整 analyst seed bank、训练比例和完整 harness。v2 的公式注册表、实体规则、物理 shuffle、默认阈值和 YAML schema 都属于可审计工程补全。
+论文未公开原始构造 prompt、模型/解码组合、source-pack mining 算法、`h_min/b_min` 取值、完整 analyst seed bank、训练比例和完整 harness。v2 的公式注册表、实体规则、物理 shuffle、默认阈值和 YAML schema 都属于可审计工程补全。v3 的教师证明 JSON、确定性候选选择和种子规格映射也属于工程补全，并非论文内部格式或评判器的逐字复现。
 
 因此合适的描述是 method-level reproduction 或 faithful reimplementation of published constraints，而不是官方数据集的 exact reproduction。
 

@@ -261,6 +261,8 @@ def replay_graph(graph: dict[str, Any], facts: dict[str, dict[str, Any]]) -> Rep
                         "inputs": input_ids,
                         "result": values[node_id].json_value(),
                         "unit": values[node_id].unit,
+                        "scale": values[node_id].scale,
+                        "currency": values[node_id].currency,
                     }
                 )
             else:

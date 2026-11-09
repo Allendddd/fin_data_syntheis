@@ -18,6 +18,7 @@ from mint_synth.synthesis.audit import CAPABILITIES, audit_atomic, audit_long, r
 from mint_synth.synthesis.dag import RuleDagPlanner, graph_summary, load_formula_registry
 from mint_synth.synthesis.decontamination import QuestionIndex
 from mint_synth.synthesis.long_horizon import DEFAULT_SEEDS, load_evaluation_questions, load_seed_bank
+from mint_synth.synthesis.seed_constraints import formulas_for_seed
 from mint_synth.workflow.planner import stage_by_name
 
 from .common import _client_stats, _compression, _envelope_writer, _grouped_payloads, _quarantine_writer, _role_client
@@ -204,32 +205,38 @@ def stage_graph_planning(
     seeds = load_seed_bank(config["query_realization"].get("seed_file"))
     training = config.get("training", {})
     if training.get("seed_fallback") and config["query_realization"].get("seed_file"):
-        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS)
+        present = {seed["seed_id"] for seed in seeds}
+        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS if seed["seed_id"] not in present)
     wanted_ids = set(training.get("seed_ids") or [])
     if wanted_ids:
         seeds = [seed for seed in seeds if seed["seed_id"] in wanted_ids]
     wanted_objective_filter = set(training.get("objective_types") or [])
     if wanted_objective_filter:
         seeds = [seed for seed in seeds if seed["task_spec_template"]["objective_type"] in wanted_objective_filter]
-    objective_by_generator = {
-        "temporal_pair": "change", "compatible_ratio": "ratio",
-        "compatible_average": "aggregation", "compatible_verification": "verification",
-        "temporal_trend": "change", "ratio_change": "change", "multi_verification": "verification",
-    }
+    wanted_formulas = set(training.get("formula_ids") or [])
     if config.get("version") == 3:
-        wanted_objectives = {seed["task_spec_template"]["objective_type"] for seed in seeds}
-        wanted_formulas = set(training.get("formula_ids") or [])
-        formulas = [formula for formula in formulas if objective_by_generator.get(formula.generator) in wanted_objectives and (not wanted_formulas or formula.formula_id in wanted_formulas)]
-    planner = RuleDagPlanner(
-        formulas,
-        allowed_operations=config["dag"]["allowed_operations"],
-        min_depth=int(config["dag"]["min_depth"]),
-        max_depth=int(config["dag"]["max_depth"]),
-        min_sources=int(config["dag"]["min_sources"]),
-        beam_width=int(config["dag"]["beam_width"]),
-        max_graphs_per_entity=int(config["dag"]["max_graphs_per_entity"]),
-        max_candidate_groups_per_formula=int(config["dag"]["max_candidate_groups_per_formula"]),
-    )
+        formulas = [formula for formula in formulas if not wanted_formulas or formula.formula_id in wanted_formulas]
+
+    def make_planner(enabled):
+        return RuleDagPlanner(
+            enabled,
+            allowed_operations=config["dag"]["allowed_operations"],
+            min_depth=int(config["dag"]["min_depth"]),
+            max_depth=int(config["dag"]["max_depth"]),
+            min_sources=int(config["dag"]["min_sources"]),
+            beam_width=int(config["dag"]["beam_width"]),
+            max_graphs_per_entity=int(config["dag"]["max_graphs_per_entity"]),
+            max_candidate_groups_per_formula=int(config["dag"]["max_candidate_groups_per_formula"]),
+        )
+
+    plans = []
+    if config.get("version") == 3:
+        for seed in sorted(seeds, key=lambda value: value["seed_id"]):
+            eligible = formulas_for_seed(seed, formulas)
+            if eligible:
+                plans.append((seed, make_planner(eligible)))
+    else:
+        plans.append((None, make_planner(formulas)))
     supplement_client = (
         _role_client(layout, config, "graph_planning", shard_id, "constructor")
         if config["dag"]["llm_supplement"]
@@ -254,57 +261,73 @@ def stage_graph_planning(
                 facts = [fact for fact in facts if not (available := published_date(fact.get("source_metadata") or {}, available_field)) or available <= cutoff]
             if not facts:
                 continue
-            candidates = planner.plan_entity(facts)
-            counts["rule_graphs"] += len(candidates)
-            if len(candidates) < minimum and supplement_client is not None:
-                counts["llm_requests"] += 1
-                try:
-                    supplemented = _llm_supplement(
-                        supplement_client,
-                        facts,
-                        planner,
-                        max_facts=int(config["dag"]["supplement_max_facts"]),
-                        max_relations=int(config["dag"]["supplement_max_relations"]),
-                    )
-                    candidates.extend(supplemented)
-                    counts["supplement_graphs"] += len(supplemented)
-                except Exception as exc:
-                    counts["supplement_errors"] += 1
-                    counts["terminal_errors"] += 1
-                    rejected.write(
-                        quarantine_row(
-                            "graph_planning", "llm_supplement_error", str(exc), payload={"canonical_entity_id": entity_id}
+            batches = []
+            planned_profiles = {}
+            for seed, planner in plans:
+                seed_facts = facts
+                dated_only = bool(seed is not None and seed["task_spec_template"]["time_sensitive"])
+                if dated_only:
+                    seed_facts = [fact for fact in facts if published_date(
+                        fact.get("source_metadata") or {}, config["input"]["available_at_field"])]
+                if not seed_facts:
+                    continue
+                profile = (tuple(formula.formula_id for formula in planner.formulas), dated_only)
+                if profile in planned_profiles:
+                    counts["planner_cache_hits"] += 1
+                else:
+                    planned_profiles[profile] = planner.plan_entity(seed_facts)
+                candidates = list(planned_profiles[profile])
+                counts["rule_graphs"] += len(candidates)
+                if len(candidates) < minimum and supplement_client is not None:
+                    counts["llm_requests"] += 1
+                    try:
+                        supplemented = _llm_supplement(
+                            supplement_client, seed_facts, planner,
+                            max_facts=int(config["dag"]["supplement_max_facts"]),
+                            max_relations=int(config["dag"]["supplement_max_relations"]),
+                        )
+                        candidates.extend(supplemented)
+                        counts["supplement_graphs"] += len(supplemented)
+                    except Exception as exc:
+                        counts["supplement_errors"] += 1
+                        counts["terminal_errors"] += 1
+                        rejected.write(quarantine_row(
+                            "graph_planning", "llm_supplement_error", str(exc),
+                            payload={"canonical_entity_id": entity_id, "seed_id": seed.get("seed_id") if seed else None},
+                        ))
+                batches.append([(seed, candidate) for candidate in candidates])
+            emitted = 0
+            for entry in itertools.zip_longest(*batches) if batches else ():
+                if emitted >= int(config["dag"]["max_graphs_per_entity"]):
+                    break
+                for item in entry:
+                    if item is None:
+                        continue
+                    seed, candidate = item
+                    if emitted >= int(config["dag"]["max_graphs_per_entity"]):
+                        break
+                    if seed is not None:
+                        candidate = {**candidate, "task_spec": dict(candidate["task_spec"])}
+                        candidate["seed"] = seed
+                        candidate["task_spec"]["time_sensitive"] = bool(seed["task_spec_template"]["time_sensitive"])
+                        candidate["task_spec"]["reasoning_form"] = seed["task_spec_template"]["reasoning_form"]
+                        candidate["task_spec"]["required_fact_roles"] = seed["task_spec_template"]["required_fact_roles"]
+                        selected_topics = set(training.get("financial_topics") or [])
+                        if selected_topics and financial_topic(candidate) not in selected_topics:
+                            continue
+                    if candidate["graph_id"] in seen_graphs:
+                        continue
+                    seen_graphs.add(candidate["graph_id"])
+                    graphs.write(
+                        envelope_row(
+                            candidate,
+                            object_id=candidate["graph_id"],
+                            canonical_entity_id=entity_id,
+                            task_type="long_horizon",
                         )
                     )
-            for candidate in candidates[: int(config["dag"]["max_graphs_per_entity"])]:
-                if config.get("version") == 3:
-                    try:
-                        eligible_seeds = [
-                            seed for seed in seeds
-                            if not seed["task_spec_template"]["time_sensitive"]
-                            or all(published_date(fact.get("source_metadata") or {}, config["input"]["available_at_field"]) for fact in candidate["evidence"])
-                        ]
-                        seed = _seed_for_candidate(candidate, eligible_seeds, int(config["run"]["random_seed"]))
-                    except ValueError:
-                        continue
-                    candidate["seed"] = seed
-                    candidate["task_spec"]["time_sensitive"] = bool(seed["task_spec_template"]["time_sensitive"])
-                    candidate["task_spec"]["reasoning_form"] = seed["task_spec_template"]["reasoning_form"]
-                    selected_topics = set(training.get("financial_topics") or [])
-                    if selected_topics and financial_topic(candidate) not in selected_topics:
-                        continue
-                if candidate["graph_id"] in seen_graphs:
-                    continue
-                seen_graphs.add(candidate["graph_id"])
-                graphs.write(
-                    envelope_row(
-                        candidate,
-                        object_id=candidate["graph_id"],
-                        canonical_entity_id=entity_id,
-                        task_type="long_horizon",
-                    )
-                )
-                counts["graphs"] += 1
+                    counts["graphs"] += 1
+                    emitted += 1
     return {
         **dict(counts),
         "llm": {"constructor": _client_stats(supplement_client)} if supplement_client is not None else {},
@@ -333,7 +356,7 @@ def _seed_for_candidate(
     if not matching:
         raise ValueError(f"no seed matches objective_type={objective!r}")
     matching.sort(key=lambda value: str(value.get("seed_id", "")))
-    offset = int(stable_id("seed_choice", random_seed, candidate.get("graph_id"), length=8).split("_")[1], 16)
+    offset = int(stable_id("seed_choice", random_seed, candidate.get("graph_id"), length=8).rsplit("_", 1)[1], 16)
     return dict(matching[offset % len(matching)])
 
 
@@ -357,7 +380,8 @@ def stage_query_realization(
     auditor = _role_client(layout, config, "query_realization", shard_id, "auditor")
     seeds = load_seed_bank(config["query_realization"].get("seed_file"))
     if config.get("training", {}).get("seed_fallback") and config["query_realization"].get("seed_file"):
-        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS)
+        present = {seed["seed_id"] for seed in seeds}
+        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS if seed["seed_id"] not in present)
     invalid_seeds = [seed.get("seed_id") for seed in seeds if not isinstance(seed.get("task_spec_template"), dict)]
     if invalid_seeds:
         raise ValueError(

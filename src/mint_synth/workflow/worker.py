@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Iterable, Mapping
 
 from mint_synth.core.config_v2 import config_fingerprint, load_config
@@ -200,7 +201,9 @@ def run_worker(run_dir: str | Path, stage_name: str, shard_id: int) -> dict[str,
     handler = HANDLERS[stage_name]
     try:
         with ShardTransaction(layout, stage_name, shard_id, signature) as transaction:
+            processing_started = perf_counter()
             metrics = handler(layout, config, plan, shard_id, transaction.path)
+            metrics["processing_seconds"] = round(perf_counter() - processing_started, 3)
             final = transaction.commit(metrics)
         if stage_name == "export":
             _publish_export_markers(layout, plan, final, metrics)
@@ -220,3 +223,8 @@ def run_worker(run_dir: str | Path, stage_name: str, shard_id: int) -> dict[str,
             **log_options,
         )
         raise
+    finally:
+        for client in layout.__dict__.pop("_role_clients", []):
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()

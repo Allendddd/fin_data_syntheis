@@ -19,7 +19,7 @@ with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16) as
     pre_action = session.checkpoint()
     result = session.step({"tool": "search_corpus", "arguments": {"query": "营业收入"}})
     visible = session.observe()
-    # 后续由调用方提供动作；结束动作是 {"final": "..."}。
+    # 后续由调用方提供动作；结束动作是 {"final": "<结构化证明 JSON 字符串>"}。
     # episode 结束后，环境进程才调用 session.grade() 取得私有校验结果。
 ```
 
@@ -29,7 +29,13 @@ with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16) as
 
 `checkpoint()` 返回不含隐藏任务的 JSON 可序列化动作前状态。已结束的轨迹可用 `checkpoint_at(step)` 重建第 `step` 次动作之前的状态，用于外部系统选定失败轨迹的关键步骤。`restore(checkpoint)` 会核对 query、快照 SHA-256、工具集指纹、截止日和预算，然后在新会话里重放历史并逐条比较观察。`fork(checkpoint)` 创建隔离分支，供同一关键步骤多次采样。自定义工具必须确定性且只读，否则重放会拒绝漂移结果。checkpoint 应保存在训练器自己的目录；本项目不生产学生轨迹数据集。
 
-`grade()` 只能在 episode 结束后调用，返回 `answer_correct`、`evidence_replayable`、`action_valid`、`cutoff_valid`、`accepted` 和二值 `reward`；`audit_record()` 合并完整轨迹、账本、失败路径与私有判定，供环境进程留档。答案按隐藏 DAG 回放校验；证据路径要求取得每个必需 chunk，且其来源 ID、原文引句和截止日可在冻结快照及实际工具观察中重放；无效动作使整条轨迹不能被接纳。这对应论文中终局答案、证据路径和动作约束三项校验的可确定部分。教师 SFT 采集也调用同一会话与 `grade()`；无关但有效的工具调用可由 `step_relevance` 屏蔽损失。
+`grade()` 只能在 episode 结束后调用，返回 `answer_correct`、`derivation_valid`、`evidence_replayable`、`action_valid`、`cutoff_valid`、`accepted` 和二值 `reward`；`audit_record()` 合并完整轨迹、账本、失败路径与私有判定，供环境进程留档。证据路径要求取得每个必需 chunk，且其来源 ID、原文引句和截止日可在冻结快照及实际工具观察中重放。`final` 仍是字符串，但其内容必须是 JSON 对象，包含 `answer`、`facts`、`constants`、`steps`、`terminal`。事实使用模型自定义局部 ID、已打开的 `chunk_id`、逐字 `quote`、值及 `unit`/`scale`/`currency`；运算步骤按依赖顺序列出局部输入 ID、操作、`params`、结果及维度。无常量或无运算时用空数组。下面是两项披露值相加的格式示意：
+
+```json
+{"answer":{"value":"160","unit":"USD","scale":"million","currency":"USD"},"facts":[{"id":"a","chunk_id":"c1","quote":"Revenue was $100 million.","value":"100","unit":"USD","scale":"million","currency":"USD"},{"id":"b","chunk_id":"c2","quote":"Revenue was $60 million.","value":"60","unit":"USD","scale":"million","currency":"USD"}],"constants":[],"steps":[{"id":"total","op":"add","inputs":["a","b"],"params":{},"result":"160","unit":"USD","scale":"million","currency":"USD"}],"terminal":"total"}
+```
+
+校验器把每个引句绑定到实际打开的快照来源，再将完整步骤映射到隐藏答案图并重算。只读完证据、只写正确答案、单位错误或省略中间运算都不能通过；无法可靠核验的自由文本也会被拒绝。教师 SFT 与外部 rollout 共用这一契约；无关但有效的工具调用可由 `step_relevance` 屏蔽损失，工具观察始终不参与 loss。该 JSON 是本项目的可审计工程契约，并非论文公开的 MintHarness 内部格式。
 
 ## 扩展工具
 

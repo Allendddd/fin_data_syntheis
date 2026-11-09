@@ -113,6 +113,7 @@ class ConfiguredRoleClient:
         user: str,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        sample_key: str | None = None,
     ) -> dict[str, Any] | list[Any]:
         del temperature
         effective_max_tokens = self.max_tokens if self.max_tokens is not None else max_tokens
@@ -122,6 +123,7 @@ class ConfiguredRoleClient:
             "user": user,
             "temperature": self.temperature,
             "max_tokens": effective_max_tokens,
+            "sample_key": sample_key,
         }
         request_key = hashlib.sha256(
             json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -139,6 +141,7 @@ class ConfiguredRoleClient:
             user=user,
             temperature=self.temperature,
             max_tokens=effective_max_tokens,
+            **({"sample_key": sample_key} if sample_key is not None else {}),
         )
         if self.cache is not None:
             response = self.cache.put(request_key, response)

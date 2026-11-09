@@ -34,6 +34,7 @@ def _schema(version: int = 2) -> dict[str, Any]:
         schema["properties"]["run"]["properties"]["fingerprint_mode"]["default"] = "sha256"
         del schema["properties"]["slurm"]
         schema["properties"]["llm"]["properties"]["roles"]["properties"]["teacher"] = {"$ref": "#/$defs/role"}
+        schema["properties"]["llm"]["properties"]["roles"]["additionalProperties"] = {"$ref": "#/$defs/role"}
         schema["properties"]["input"]["properties"]["available_at_field"] = {"type": "string", "minLength": 1, "default": "published_at"}
         schema["properties"]["query_export"] = {
             "type": "object", "additionalProperties": False, "default": {},
@@ -57,6 +58,13 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "atomic_enabled": {"type": "boolean", "default": True},
                 "long_enabled": {"type": "boolean", "default": True},
                 "teacher_role": {"enum": ["teacher", "constructor", "auditor", "extractor", "entity_resolver"], "default": "constructor"},
+                "atomic_teacher_roles": {"type": "array", "minItems": 1, "uniqueItems": True,
+                                          "items": {"type": "string", "minLength": 1}, "default": ["constructor"]},
+                "atomic_samples_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
+                "atomic_selection_policy": {"enum": ["concise", "first_valid"], "default": "concise"},
+                "atomic_audit_fallback": {"type": "boolean", "default": False},
+                "long_teacher_roles": {"type": "array", "uniqueItems": True,
+                                       "items": {"type": "string", "minLength": 1}, "default": []},
                 "rollouts_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
                 "max_tool_steps": {"type": "integer", "minimum": 2, "maximum": 64, "default": 16},
                 "max_context_chars": {"type": "integer", "minimum": 2000, "default": 24000},
@@ -148,8 +156,16 @@ def validate_cross_fields(config: Mapping[str, Any]) -> None:
             raise ConfigError("v3 runs require stages.facts for the retrieval index")
         if sft_enabled and not training.get("atomic_enabled", True) and not training.get("long_enabled", True):
             raise ConfigError("at least one training family must be enabled")
-        if sft_enabled and training.get("long_enabled", True) and training.get("teacher_role") not in config.get("llm", {}).get("roles", {}):
-            raise ConfigError("training.teacher_role must reference a configured llm.roles entry")
+        roles = config.get("llm", {}).get("roles", {})
+        if sft_enabled and training.get("atomic_enabled", True):
+            missing = set(training.get("atomic_teacher_roles", ["constructor"])) - set(roles)
+            if missing:
+                raise ConfigError(f"training.atomic_teacher_roles references unknown roles: {sorted(missing)}")
+        if sft_enabled and training.get("long_enabled", True):
+            requested = training.get("long_teacher_roles") or [training.get("teacher_role")]
+            missing = set(requested) - set(roles)
+            if missing:
+                raise ConfigError(f"training.long_teacher_roles references unknown roles: {sorted(missing)}")
     chunking = config.get("chunking", {})
     if int(chunking.get("overlap_chars", 0)) >= int(chunking.get("max_chars", 1)):
         raise ConfigError("chunking.overlap_chars must be smaller than chunking.max_chars")

@@ -13,7 +13,8 @@ from mint_synth.core.config_v2 import config_fingerprint, dump_config, load_conf
 from mint_synth.harness.registry import load_tool_registry
 from mint_synth.synthesis.dag import load_formula_registry
 from mint_synth.synthesis.entity import load_aliases
-from mint_synth.synthesis.long_horizon import load_evaluation_questions, load_seed_bank
+from mint_synth.synthesis.long_horizon import DEFAULT_SEEDS, load_evaluation_questions, load_seed_bank
+from mint_synth.synthesis.seed_constraints import formulas_for_seed
 from mint_synth.core.provenance import (
     auxiliary_fingerprints,
     deployment_image_fingerprint,
@@ -147,6 +148,9 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
 
     aliases = load_aliases(config["entity_resolution"].get("alias_file"))
     seeds = load_seed_bank(config["query_realization"].get("seed_file"))
+    if config.get("version") == 3 and config.get("training", {}).get("seed_fallback") and config["query_realization"].get("seed_file"):
+        present = {seed["seed_id"] for seed in seeds}
+        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS if seed["seed_id"] not in present)
     objectives = {"comparison", "change", "ratio", "aggregation", "verification"}
     seed_ids: set[str] = set()
     for index, seed in enumerate(seeds, 1):
@@ -183,18 +187,11 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
         selected_seeds = [seed for seed in selected_seeds if not training["objective_types"] or seed["task_spec_template"]["objective_type"] in training["objective_types"]]
         if long_requested and not selected_seeds:
             raise ValueError("no long-horizon seed remains after training selectors")
-        objective_by_generator = {
-            "temporal_pair": "change", "compatible_ratio": "ratio",
-            "compatible_average": "aggregation", "compatible_verification": "verification",
-            "temporal_trend": "change", "ratio_change": "change", "multi_verification": "verification",
-        }
-        enabled_objectives = {
-            objective_by_generator.get(formula.generator)
-            for formula in enabled_formulas
-            if not training["formula_ids"] or formula.formula_id in training["formula_ids"]
-        }
-        if long_requested and not any(seed["task_spec_template"]["objective_type"] in enabled_objectives for seed in selected_seeds):
-            raise ValueError("selected long-horizon seeds have no enabled matching formula")
+        usable_formulas = [formula for formula in enabled_formulas
+                           if not training["formula_ids"] or formula.formula_id in training["formula_ids"]]
+        matched = [formulas_for_seed(seed, usable_formulas) for seed in selected_seeds]
+        if long_requested and not any(matched):
+            raise ValueError("selected long-horizon seeds have no enabled matching formula and fact roles")
     evaluation = load_evaluation_questions(
         config["quality"].get("evaluation_file"),
         max_questions=int(config["quality"]["max_evaluation_questions"]),

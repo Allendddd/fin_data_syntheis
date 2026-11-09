@@ -10,6 +10,7 @@ from mint_synth.harness.state import _json
 def long_rollout(
     task: Mapping[str, Any], client: Any, index_path: Path,
     config: Mapping[str, Any], registry: ToolRegistry | None = None,
+    *, sample_key: str | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     training = config["training"]
     cutoff = str(config["run"]["cutoff"])
@@ -32,7 +33,8 @@ def long_rollout(
         for _ in range(session.max_steps):
             action = client.complete_json(
                 system=session.system_prompt, user=_json(session.observe()),
-                temperature=0.2, max_tokens=700,
+                temperature=0.2, max_tokens=2400,
+                **({"sample_key": sample_key} if sample_key is not None else {}),
             )
             if not isinstance(action, dict):
                 return None, "teacher returned non-object"

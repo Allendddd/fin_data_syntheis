@@ -46,7 +46,15 @@ class LlmClientTests(unittest.TestCase):
             )
             self.assertEqual(client.complete_json(system="system", user="user"), {"ok": True})
             self.assertEqual(Handler.request_payload["seed"], 7)
-            self.assertEqual(client.stats()["total_tokens"], 12)
+            client.complete_json(system="system", user="user", sample_key="task:1")
+            first_seed = Handler.request_payload["seed"]
+            client.complete_json(system="system", user="user", sample_key="task:1")
+            self.assertEqual(Handler.request_payload["seed"], first_seed)
+            client.complete_json(system="system", user="user", sample_key="task:2")
+            self.assertNotEqual(Handler.request_payload["seed"], first_seed)
+            self.assertNotIn("sample_key", Handler.request_payload)
+            self.assertEqual(Handler.request_payload["messages"][1]["content"], "user")
+            self.assertEqual(client.stats()["total_tokens"], 48)
             client.close()
         finally:
             server.shutdown()

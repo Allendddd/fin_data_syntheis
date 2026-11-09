@@ -36,7 +36,9 @@ def _role_client(
     role: str,
 ):
     cache_path = layout.root / "cache" / "llm" / stage / f"{shard_id:06d}-{role}.sqlite3"
-    return client_for_role(config, role, cache_path=cache_path)
+    client = client_for_role(config, role, cache_path=cache_path)
+    layout.__dict__.setdefault("_role_clients", []).append(client)
+    return client
 
 
 def _envelope_writer(path: Path, config: Mapping[str, Any]) -> BufferedParquetWriter:

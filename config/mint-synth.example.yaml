@@ -69,6 +69,11 @@ training:
   atomic_enabled: true
   long_enabled: true
   teacher_role: teacher
+  atomic_teacher_roles: [teacher]
+  atomic_samples_per_task: 2
+  atomic_selection_policy: concise
+  atomic_audit_fallback: false
+  long_teacher_roles: [teacher]
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000
