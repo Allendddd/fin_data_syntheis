@@ -10,9 +10,9 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +26,7 @@ from mint_synth.core.run_state import atomic_json, read_json
 
 _HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade",
+    "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
 }
 _SECRET_NAME = re.compile(r"(?:authorization|api[-_]?key|cookie|token|secret|credential|password)", re.I)
 
@@ -78,6 +78,8 @@ def _forward_headers(headers: list[tuple[str, str]], *, response: bool = False) 
     excluded = _HOP_HEADERS | connection_tokens | {"content-length"}
     if not response:
         excluded = excluded | {"host", "expect"}
+    else:
+        excluded = excluded | {"x-mint-trace-call-id"}
     return [(name, value) for name, value in headers if name.lower() not in excluded]
 
 
@@ -119,10 +121,15 @@ class TraceProxyServer(ThreadingHTTPServer):
         if os.name == "posix":
             config.output_dir.chmod(0o700)
             self.calls_dir.chmod(0o700)
+        agent_path = config.output_dir / "agent.json"
+        if agent_path.exists():
+            agent_record = read_json(agent_path)
+            if not isinstance(agent_record, dict) or agent_record.get("run_id") != config.run_id:
+                raise ValueError("run_id does not match the agent trace in output_dir")
         manifest_path = config.output_dir / "run.json"
         if manifest_path.exists():
             previous = read_json(manifest_path)
-            if previous.get("run_id") != config.run_id or previous.get("upstream") != config.upstream:
+            if not isinstance(previous, dict) or previous.get("run_id") != config.run_id or previous.get("upstream") != config.upstream:
                 raise ValueError("output_dir already belongs to a different trace run")
         else:
             atomic_json(manifest_path, {
@@ -253,6 +260,8 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                         raise _BadRequest("incomplete request body")
                     append(chunk, stream)
                     remaining -= len(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
         return bytes(body), digest.hexdigest()
 
     def _proxy(self) -> None:
@@ -334,9 +343,11 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                     self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
                 response_started = True
-                descriptor = os.open(response_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                chunk_descriptor = os.open(chunks_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "wb") as response_file, os.fdopen(chunk_descriptor, "w", encoding="utf-8") as chunks_file:
+                with ExitStack() as stack:
+                    descriptor = os.open(response_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    response_file = stack.enter_context(os.fdopen(descriptor, "wb"))
+                    chunk_descriptor = os.open(chunks_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    chunks_file = stack.enter_context(os.fdopen(chunk_descriptor, "w", encoding="utf-8"))
                     if has_body:
                         for chunk in upstream.iter_raw():
                             if not chunk:
@@ -347,6 +358,7 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                             response_sha.update(chunk)
                             response_bytes += len(chunk)
                             chunks_file.write(json.dumps({
+                                "observed_at": _now(),
                                 "offset_ms": round((time.monotonic_ns() - started) / 1_000_000, 3),
                                 "byte_offset": offset,
                                 "byte_length": len(chunk),
@@ -356,6 +368,10 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                             self.wfile.flush()
                         self.wfile.write(b"0\r\n\r\n")
                         self.wfile.flush()
+                    response_file.flush()
+                    chunks_file.flush()
+                    os.fsync(response_file.fileno())
+                    os.fsync(chunks_file.fileno())
                 response_data = metadata["response"]
                 assert isinstance(response_data, dict)
                 response_data["body_bytes"] = response_bytes
@@ -387,5 +403,7 @@ def serve_trace_proxy(config: TraceProxyConfig) -> None:
     print(f"trace proxy listening on http://127.0.0.1:{server.server_port}; run_id={config.run_id}", flush=True)
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
         server.server_close()

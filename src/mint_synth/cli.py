@@ -67,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     trace_proxy.add_argument("--port", type=int, default=8765, help="Loopback listen port (default: 8765)")
     trace_proxy.add_argument("--max-request-bytes", type=int, default=64 * 1024 * 1024)
 
+    trace_run = commands.add_parser("trace-run", help="Timestamp a Claude Code or Codex JSONL agent run")
+    trace_run.add_argument("--output-dir", required=True, help="Same directory as the trace proxy")
+    trace_run.add_argument("--run-id", required=True, help="Must match the trace proxy run identifier")
+    trace_run.add_argument("agent_command", nargs=argparse.REMAINDER, help="Command after --, including agent JSONL flags")
+
     return parser
 
 
@@ -130,6 +135,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_request_bytes=args.max_request_bytes,
             ))
             return 0
+        if args.command == "trace-run":
+            from mint_synth.trace_runner import run_agent_trace
+
+            command = args.agent_command[1:] if args.agent_command[:1] == ["--"] else args.agent_command
+            return run_agent_trace(command, output_dir=args.output_dir, run_id=args.run_id)
         parser.error(f"unknown command: {args.command}")
     except (ConfigError, OSError, ValueError, RuntimeError, KeyError) as exc:
         print(f"mint-synth: error: {exc}", file=sys.stderr)
