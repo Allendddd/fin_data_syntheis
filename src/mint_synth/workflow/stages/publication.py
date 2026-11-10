@@ -126,6 +126,7 @@ def stage_export(
             for family in ("atomic", "long") for split in ("train", "val")
         }
         sidecar = (root / "audit-sidecar.jsonl").open("w", encoding="utf-8", newline="\n")
+        trajectories = (root / "trajectory-index.jsonl").open("w", encoding="utf-8", newline="\n")
         try:
             for prepared_shard in range(prepared_count):
                 prepared = layout.shard("sft_prepare", prepared_shard)
@@ -137,10 +138,24 @@ def stage_export(
                             streams[(family, split)].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                             sft_counts[family] += 1
                             sft_counts[f"{family}_{split}"] += 1
+                shard_prefix = f"traces/{prepared_shard:06d}/"
                 with (prepared / "sidecar.jsonl").open("r", encoding="utf-8") as source:
-                    shutil.copyfileobj(source, sidecar)
+                    for line in source:
+                        row = json.loads(line)
+                        for candidate in row.get("teacher_audit", {}).get("candidates", []):
+                            if candidate.get("trace"):
+                                candidate["trace"] = shard_prefix + candidate["trace"].removeprefix("traces/")
+                        sidecar.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                if (prepared / "traces").is_dir():
+                    shutil.copytree(prepared / "traces", root / "traces" / f"{prepared_shard:06d}")
+                if (prepared / "trajectories.jsonl").is_file():
+                    with (prepared / "trajectories.jsonl").open("r", encoding="utf-8") as source:
+                        for line in source:
+                            row = json.loads(line)
+                            row["trace"] = shard_prefix + row["trace"].removeprefix("traces/")
+                            trajectories.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         finally:
-            for stream in [*streams.values(), sidecar]:
+            for stream in [*streams.values(), sidecar, trajectories]:
                 stream.flush()
                 os.fsync(stream.fileno())
                 stream.close()
@@ -152,7 +167,7 @@ def stage_export(
             available = sft_counts[f"{family}_train"]
             if config["training"][enabled_key] and available < required:
                 raise RuntimeError(f"SFT publication blocked: {family} has {available} accepted training samples; requires {required}")
-        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts), "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl"})
+        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts), "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl", "trajectory_index": "trajectory-index.jsonl"})
     query_counts: dict[str, int] = {}
     if config.get("version") == 3 and config["query_export"]["enabled"]:
         query_source = layout.shard("query_export", 0) / "queries"

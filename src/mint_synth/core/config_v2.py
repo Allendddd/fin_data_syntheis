@@ -65,6 +65,19 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "atomic_audit_fallback": {"type": "boolean", "default": False},
                 "long_teacher_roles": {"type": "array", "uniqueItems": True,
                                        "items": {"type": "string", "minLength": 1}, "default": []},
+                "agent_runtime": {
+                    "type": "object", "additionalProperties": False, "default": {},
+                    "properties": {
+                        "default": {"enum": ["native", "strands", "codex", "claude_code"], "default": "native"},
+                        "by_role": {"type": "object", "default": {},
+                                    "additionalProperties": {"enum": ["native", "strands", "codex", "claude_code"]}},
+                        "commands": {"type": "object", "default": {}, "additionalProperties": False,
+                                     "properties": {name: {"type": "array", "minItems": 1,
+                                                            "items": {"type": "string", "minLength": 1}}
+                                                    for name in ("codex", "claude_code")}},
+                        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 600},
+                    },
+                },
                 "rollouts_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
                 "max_tool_steps": {"type": "integer", "minimum": 2, "maximum": 64, "default": 16},
                 "max_context_chars": {"type": "integer", "minimum": 2000, "default": 24000},
@@ -131,6 +144,9 @@ def materialize_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
 def validate_cross_fields(config: Mapping[str, Any]) -> None:
     if config.get("version") == 3:
         training = config.get("training", {})
+        for role in training.get("agent_runtime", {}).get("by_role", {}):
+            if role not in config.get("llm", {}).get("roles", {}):
+                raise ConfigError(f"training.agent_runtime.by_role references unknown LLM role: {role}")
         query_export = config.get("query_export", {})
         query_enabled = query_export.get("enabled", True)
         sft_enabled = training.get("enabled", True)

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
 from mint_synth.core.run_state import RunLayout
+from mint_synth.agents.base import settings_for_role
 from mint_synth.harness.registry import load_tool_registry
 from mint_synth.inference.runtime import bounded_map
 from mint_synth.sft.atomic_teacher import sample_atomic
@@ -31,13 +34,19 @@ def stage_sft_prepare(
     training = config["training"]
     atomic_roles = training.get("atomic_teacher_roles", ["constructor"]) if training["atomic_enabled"] else []
     long_roles = (training.get("long_teacher_roles") or [training["teacher_role"]]) if training["long_enabled"] else []
-    clients = {role: _role_client(layout, config, "sft_prepare", shard_id, role)
-               for role in dict.fromkeys([*atomic_roles, *long_roles])}
+    agent_settings = {role: settings_for_role(config, role) for role in long_roles}
+    json_roles = [*atomic_roles, *(role for role in long_roles if agent_settings[role][1].name == "native")]
+    clients = {role: _role_client(layout, config, "sft_prepare", shard_id, role) for role in dict.fromkeys(json_roles)}
     registry = load_tool_registry(config.get("harness", {}).get("tool_registry")) if long_roles else None
+    if long_roles:
+        traces = output / "traces"
+        traces.mkdir(mode=0o700, exist_ok=True)
+        if os.name == "posix":
+            traces.chmod(0o700)
     counts: dict[str, int] = defaultdict(int)
     streams = {
         name: (output / f"{name}.jsonl").open("w", encoding="utf-8", newline="\n")
-        for name in ("atomic", "long", "sidecar", "rejected")
+        for name in ("atomic", "long", "sidecar", "rejected", "trajectories")
     }
 
     def selected_tasks():
@@ -68,14 +77,20 @@ def stage_sft_prepare(
                 index_path = layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
                 for attempt in range(int(training["rollouts_per_task"])):
                     role = long_roles[attempt % len(long_roles)]
+                    model, runtime = agent_settings[role]
+                    sample_key = f"long:{task_id}:{role}:{attempt + 1}"
+                    trace_ref = "traces/" + hashlib.sha256(sample_key.encode()).hexdigest()[:32]
+                    candidate = {"role": role, "attempt": attempt + 1, "runtime": runtime.name,
+                                 "model": model.model, "trace": trace_ref, "accepted": False, "reason": "rollout failed"}
+                    teacher_audit["candidates"].append(candidate)
                     sample, reason = long_rollout(
-                        task, clients[role], index_path, config, registry,
-                        sample_key=f"long:{task_id}:{role}:{attempt + 1}",
+                        task, clients.get(role), index_path, config, registry, sample_key=sample_key,
+                        model=model, runtime=runtime, trace_dir=output / trace_ref,
                     )
-                    teacher_audit["candidates"].append({"role": role, "attempt": attempt + 1,
-                                                        "accepted": sample is not None, "reason": reason})
+                    candidate.update(accepted=sample is not None, reason=reason)
                     if sample is not None:
                         teacher_audit["selected"] = {"source": "teacher", "role": role,
+                                                     "runtime": runtime.name,
                                                      "attempt": attempt + 1}
                         break
             return task, family, sample, teacher_audit, reason
@@ -92,6 +107,8 @@ def stage_sft_prepare(
                 counts["atomic_candidates"] += len(teacher_audit["candidates"])
             else:
                 counts["rollouts"] += len(teacher_audit["candidates"])
+                for candidate in teacher_audit["candidates"]:
+                    streams["trajectories"].write(json.dumps({"task_id": task_id, **candidate}, ensure_ascii=False) + "\n")
             try:
                 if sample is None:
                     counts["rejected"] += 1

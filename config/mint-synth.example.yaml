@@ -74,6 +74,11 @@ training:
   atomic_selection_policy: concise
   atomic_audit_fallback: false
   long_teacher_roles: [teacher]
+  agent_runtime:
+    default: native             # native | strands | codex | claude_code
+    by_role: {}                  # e.g. {teacher: strands}; roles may use different runtimes
+    commands: {}                 # e.g. {codex: [/opt/codex/bin/codex], claude_code: [/opt/bin/claude]}
+    timeout_seconds: 600
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000

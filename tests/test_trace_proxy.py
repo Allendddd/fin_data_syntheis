@@ -39,6 +39,62 @@ class QuietHandler(BaseHTTPRequestHandler):
 
 
 class TraceProxyTests(unittest.TestCase):
+    def test_closing_capture_freezes_files_before_a_late_stream_finishes(self) -> None:
+        release = threading.Event()
+        received = threading.Event()
+
+        class Upstream(QuietHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(b"3\r\none\r\n")
+                self.wfile.flush()
+                release.wait(5)
+                try:
+                    self.wfile.write(b"3\r\ntwo\r\n0\r\n\r\n")
+                    self.wfile.flush()
+                except OSError:
+                    pass
+
+        with TemporaryDirectory() as directory:
+            upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+            with running(upstream):
+                root = Path(directory) / "trace"
+                proxy = TraceProxyServer(TraceProxyConfig(
+                    upstream=f"http://127.0.0.1:{upstream.server_port}", output_dir=root, run_id="late", port=0))
+                server_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+                server_thread.start()
+
+                def request():
+                    try:
+                        with httpx.Client(trust_env=False, timeout=4) as client:
+                            with client.stream("POST", f"http://127.0.0.1:{proxy.server_port}/v1/responses", content=b"{}") as response:
+                                stream = response.iter_raw()
+                                next(stream)
+                                received.set()
+                                list(stream)
+                    except httpx.HTTPError:
+                        pass
+
+                request_thread = threading.Thread(target=request, daemon=True)
+                request_thread.start()
+                try:
+                    self.assertTrue(received.wait(3))
+                    proxy.shutdown()
+                    proxy.server_close()
+                    frozen = {path.name: path.read_bytes() for path in (root / "calls").iterdir()}
+                    release.set()
+                    self.assertTrue(proxy.wait_idle(timeout=3))
+                    self.assertEqual(frozen, {path.name: path.read_bytes() for path in (root / "calls").iterdir()})
+                finally:
+                    release.set()
+                    proxy.server_close()
+                    server_thread.join(timeout=2)
+                    request_thread.join(timeout=3)
+
     def test_json_passthrough_and_private_trace(self) -> None:
         observed: dict[str, object] = {}
 

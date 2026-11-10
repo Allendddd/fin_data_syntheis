@@ -4,6 +4,8 @@
 
 在 Linux 上采集 Claude Code/Codex agent 事件与 vLLM/SGLang 模型请求，见 [Agent 轨迹采集](docs/agent-tracing.md)。
 
+长程教师合成可配置 Strands、Codex 或 Claude Code 作为执行 runtime，统一调用金融工具并保留原始轨迹，见 [教师 runtimes](docs/teacher-runtimes.md)。
+
 金融数据合成流水线：从 JSONL/Parquet 语料构造并验证长程 query，再按需让强模型在冻结语料的 harness 中执行 query，采集 SFT `messages` 轨迹。query 可交给项目外的 OPD 流程；本项目提供共用的执行与私有校验环境，不包含模型训练器、学生策略调用或参数更新。
 
 - [数据构造方法](docs/methodology.md)

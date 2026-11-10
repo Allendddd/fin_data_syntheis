@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+strands = ["strands-agents[openai]>=1.35,<2"]
 
 [project.scripts]
 mint-synth = "mint_synth.cli:main"

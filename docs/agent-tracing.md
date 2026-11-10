@@ -1,5 +1,7 @@
 # Claude Code / Codex 轨迹采集（Linux 运行）
 
+若要在本项目的长程教师数据合成流程中自动运行 Strands/Codex/Claude Code，并共用金融工具与私有校验，请使用 [教师 runtime 配置](teacher-runtimes.md)。本页用于独立 agent 命令的手工采集。
+
 这套采集分两层：`trace-run` 保存 agent CLI 的 JSONL 事件（消息、工具调用及工具结果）；`trace-proxy` 位于 agent 与 vLLM/SGLang 之间，保存每次模型 API 请求、完整响应和流式片段的接收时间。两者用同一个 `run_id` 和目录。模型服务自身的日志可再提供推理侧请求 ID、token 和性能信息。服务日志单独使用时，看不到 CLI 在本地执行工具后的完整观察结果。
 
 以下命令在 **Linux 服务器**运行。Windows 工作站只用于编写代码。本项目要求 Python 3.10–3.13；在服务器仓库根目录安装：

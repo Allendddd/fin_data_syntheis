@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from contextlib import ExitStack
@@ -115,6 +116,10 @@ class TraceProxyServer(ThreadingHTTPServer):
 
     def __init__(self, config: TraceProxyConfig):
         self.config = config
+        self._activity = threading.Condition()
+        self._inflight = 0
+        self._capture_lock = threading.RLock()
+        self._capture_frozen = False
         self.calls_dir = config.output_dir / "calls"
         config.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.calls_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -155,8 +160,40 @@ class TraceProxyServer(ThreadingHTTPServer):
             raise ValueError("upstream points back to the proxy listener")
 
     def server_close(self) -> None:
+        # A timed-out upstream stream can outlive its caller. Freeze artifacts
+        # before returning so a later callback cannot mutate a published run.
+        with self._capture_lock:
+            self._capture_frozen = True
         super().server_close()
         self.client.close()
+
+    def capture_json(self, path: Path, value: object) -> None:
+        with self._capture_lock:
+            if not self._capture_frozen:
+                atomic_json(path, value)
+
+    def capture_open(self, path: Path) -> int:
+        with self._capture_lock:
+            if self._capture_frozen:
+                raise OSError("trace capture is closed")
+            return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+    def capture_write(self, stream: object, value: bytes | str) -> None:
+        with self._capture_lock:
+            if self._capture_frozen:
+                raise OSError("trace capture is closed")
+            stream.write(value)  # type: ignore[attr-defined]
+            stream.flush()  # type: ignore[attr-defined]
+
+    def wait_idle(self, timeout: float = 5) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._activity:
+            while self._inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._activity.wait(remaining)
+        return True
 
 
 class TraceProxyHandler(BaseHTTPRequestHandler):
@@ -216,9 +253,9 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                 raise _BodyTooLarge()
             body.extend(chunk)
             digest.update(chunk)
-            stream.write(chunk)  # type: ignore[attr-defined]
+            self.server.capture_write(stream, chunk)
 
-        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = self.server.capture_open(output)
         with os.fdopen(descriptor, "wb") as stream:
             if transfer == "chunked":
                 while True:
@@ -265,6 +302,18 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
         return bytes(body), digest.hexdigest()
 
     def _proxy(self) -> None:
+        with self.server._activity:
+            self.server._inflight += 1
+        try:
+            self._proxy_call()
+        except OSError:
+            self.close_connection = True
+        finally:
+            with self.server._activity:
+                self.server._inflight -= 1
+                self.server._activity.notify_all()
+
+    def _proxy_call(self) -> None:
         target = self.path
         parsed = urlsplit(target)
         if not target.startswith("/") or target.startswith("//") or parsed.scheme or parsed.netloc or "\\" in target:
@@ -292,13 +341,13 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                 "body_file": request_path.name,
             },
         }
-        atomic_json(metadata_path, metadata)
+        self.server.capture_json(metadata_path, metadata)
         try:
             body, body_sha = self._read_body(request_path)
         except (_BadRequest, _BodyTooLarge) as exc:
             metadata["state"] = "request_rejected"
             metadata["finished_at"] = _now()
-            atomic_json(metadata_path, metadata)
+            self.server.capture_json(metadata_path, metadata)
             status = 413 if isinstance(exc, _BodyTooLarge) else 400
             self._send_error_json(status, "request body too large" if status == 413 else str(exc), call_id)
             return
@@ -312,7 +361,7 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
             forwarded.append(("X-Request-Id", request_id))
         request_data["request_id"] = request_id
         metadata["state"] = "awaiting_upstream"
-        atomic_json(metadata_path, metadata)
+        self.server.capture_json(metadata_path, metadata)
 
         response_started = False
         response_bytes = 0
@@ -334,7 +383,7 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                     "upstream_request_id": upstream.headers.get("X-Request-Id"),
                 }
                 metadata["state"] = "streaming_response"
-                atomic_json(metadata_path, metadata)
+                self.server.capture_json(metadata_path, metadata)
                 self.send_response_only(upstream.status_code)
                 for name, value in _forward_headers(upstream_headers, response=True):
                     self.send_header(name, value)
@@ -344,26 +393,24 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 response_started = True
                 with ExitStack() as stack:
-                    descriptor = os.open(response_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    descriptor = self.server.capture_open(response_path)
                     response_file = stack.enter_context(os.fdopen(descriptor, "wb"))
-                    chunk_descriptor = os.open(chunks_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    chunk_descriptor = self.server.capture_open(chunks_path)
                     chunks_file = stack.enter_context(os.fdopen(chunk_descriptor, "w", encoding="utf-8"))
                     if has_body:
                         for chunk in upstream.iter_raw():
                             if not chunk:
                                 continue
                             offset = response_bytes
-                            response_file.write(chunk)
-                            response_file.flush()
+                            self.server.capture_write(response_file, chunk)
                             response_sha.update(chunk)
                             response_bytes += len(chunk)
-                            chunks_file.write(json.dumps({
+                            self.server.capture_write(chunks_file, json.dumps({
                                 "observed_at": _now(),
                                 "offset_ms": round((time.monotonic_ns() - started) / 1_000_000, 3),
                                 "byte_offset": offset,
                                 "byte_length": len(chunk),
                             }) + "\n")
-                            chunks_file.flush()
                             self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii") + chunk + b"\r\n")
                             self.wfile.flush()
                         self.wfile.write(b"0\r\n\r\n")
@@ -395,7 +442,7 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                 response_data["complete"] = False
             metadata["finished_at"] = _now()
             metadata["elapsed_ms"] = round((time.monotonic_ns() - started) / 1_000_000, 3)
-            atomic_json(metadata_path, metadata)
+            self.server.capture_json(metadata_path, metadata)
 
 
 def serve_trace_proxy(config: TraceProxyConfig) -> None:
