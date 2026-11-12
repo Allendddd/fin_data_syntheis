@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>mint-synth：一条数据如何被合成</title>
+  <title>mint-synth：数据合成全流程与技术细节</title>
   <style>
     :root {
       --bg: #08111f;
@@ -265,273 +265,716 @@
       .metric, .card, .stage, .branch, details { box-shadow: none; }
       section { break-inside: avoid; }
     }
+
+    .toc { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:20px; }
+    .toc a { display:block; padding:9px 12px; border:1px solid var(--line); border-radius:9px; font-size:13px; }
+    .triple { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+    .stack { display:grid; gap:12px; }
+    .ribbon { padding:14px 18px; margin:16px 0; border:1px dashed var(--cyan); border-radius:12px; background:rgba(67,211,199,.05); }
+    .caption, .source { color:var(--muted); font-size:12px; }
+    .source { margin-top:14px; }
+    .source a { margin-right:12px; overflow-wrap:anywhere; }
+    .tag { color:var(--amber); font-size:12px; font-weight:800; }
+    .formula { font-size:19px; line-height:1.8; color:var(--cyan); margin:16px 0; }
+    .dag-example { display:grid; grid-template-columns:1.35fr 36px 1fr 36px 1fr; align-items:center; gap:10px; padding:22px; border:1px solid var(--line); border-radius:var(--radius); background:#0a1626; }
+    .dag-example .node { min-width:0; }
+    .proof-loop { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+    .proof-loop > div { padding:16px; border:1px solid var(--line); border-radius:12px; background:var(--panel); min-width:0; }
+    .proof-loop strong { color:var(--cyan); }
+    .proof-loop small { display:block; color:var(--muted); margin-top:5px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:9px; margin:22px 0; }
+    button { font:inherit; font-size:13px; color:var(--text); background:var(--panel-2); border:1px solid var(--line); border-radius:9px; padding:9px 13px; cursor:pointer; }
+    button:hover { border-color:var(--cyan); }
+    ul,ol { padding-left:22px; }
+    li { margin:6px 0; }
+    section[id] { scroll-margin-top:76px; }
+    td code,li code,p code { overflow-wrap:anywhere; }
+    details > div { color:var(--text); }
+    .boundary { border-left:3px solid var(--amber); padding-left:15px; }
+    @media(max-width:900px) {
+      .triple { grid-template-columns:1fr; }
+      .toc { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .proof-loop { grid-template-columns:1fr; }
+      .dag-example { grid-template-columns:1fr; }
+      .dag-example > .arrow { transform:rotate(90deg); }
+    }
+    @media(max-width:560px) {
+      .toc { grid-template-columns:1fr; }
+      .topbar nav a { display:none; }
+      .topbar nav a:last-child { display:inline; }
+    }
+    @media print {
+      @page { size:A4; margin:14mm 12mm; }
+      html { scroll-behavior:auto; overflow:visible; }
+      body { color:#17202a; font-size:10pt; overflow:visible; }
+      .wrap { width:100%; }
+      .hero { padding:12px 0 20px; }
+      h1 { font-size:30pt; }
+      h2 { font-size:20pt; }
+      h3 { font-size:12pt; }
+      section { padding:15px 0; break-inside:auto; }
+      .topbar, .toolbar, .toc { display:none; }
+      .metric,.card,.stage,.branch,.note,details { background:#fff; box-shadow:none; }
+      pre,.dag-example,.proof-loop > div { background:#f6f8fb; color:#17202a; }
+      pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:8pt; }
+      a,code,.number,.formula,.node,.tag { color:#154f76; }
+      .table-wrap,.flow,.trace { overflow:visible; }
+      table { min-width:0; font-size:8pt; }
+      th,td { padding:7px; overflow-wrap:anywhere; }
+      thead { display:table-header-group; }
+      tr,.node,.metric { break-inside:avoid; }
+      .flow { grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+      .stage:not(:last-child)::after { display:none; }
+      .trace { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      .dag-example { grid-template-columns:1.2fr 20px 1fr 20px 1fr; padding:12px; }
+      .dag-example > .arrow { transform:none; }
+      .callout,.ribbon { background:#f6f8fb; }
+      details > div,.branch-head p,.caption,.source { color:#34495e; }
+      .ok { color:#11653d; } .bad { color:#9b2638; }
+      details, .card { box-shadow:none; }
+    }
   </style>
 </head>
 <body>
   <header class="topbar">
     <div class="wrap">
-      <div class="brand">mint-synth / 数据合成流程</div>
-      <nav aria-label="页面导航">
-        <a href="#lifecycle">单条记录</a>
-        <a href="#branches">两条产线</a>
-        <a href="#quality">质量门</a>
-        <a href="project-architecture.html">项目架构 →</a>
+      <div class="brand">mint-synth / 数据合成技术全景</div>
+      <nav aria-label="快捷导航">
+        <a href="#overview">全流程</a><a href="#seeds">种子</a><a href="#dag">DAG</a><a href="#teacher">教师轨迹</a>
+        <a href="project-architecture.html">工程架构 →</a>
       </nav>
     </div>
   </header>
-
   <main>
     <section class="hero">
       <div class="wrap">
-        <div class="eyebrow">Record to auditable task</div>
-        <h1>一条原始数据，如何变成可回放的金融训练任务</h1>
-        <p class="lead">从 JSONL/Parquet 的一行开始，先建立稳定来源定位，再抽取事实。atomic 任务在本地 chunk 内构造；long-horizon 任务把同一金融实体的多份来源汇合成答案 DAG，回放答案后才生成自然语言问题。</p>
+        <div class="eyebrow">Evidence-first financial data synthesis · v3</div>
+        <h1>从原始金融语料，<br>到有证据、可回放的合成数据</h1>
+        <p class="lead">先把原文变成可定位事实，由分析师种子限定研究意图，再用注册公式构建并执行答案 DAG，随后生成问题。合格问题可独立导出，也可交给强模型 agent 检索、计算并提交证明，得到经过校验的 SFT 轨迹。</p>
+        <p class="caption">文档对应当前仓库实现，服务于技术汇报与实现核对。项目负责离线数据合成和轨迹采集；训练器、RL 参数更新与模型部署由项目外系统承担。下文示例是演示数据，配置数值以 resolved_config.yaml 为准。</p>
         <div class="hero-grid">
-          <div class="metric"><strong>0 → N</strong><span>一条输入可能产生零个或多个任务</span></div>
-          <div class="metric"><strong>6,000</strong><span>默认单 chunk 最大字符数</span></div>
-          <div class="metric"><strong>≥ 2</strong><span>长链任务默认独立来源数</span></div>
-          <div class="metric"><strong>2–3</strong><span>当前默认成品 DAG 的实际深度</span></div>
+          <div class="metric"><strong>原文 → 事实</strong><span>事实数值必须在逐字证据中出现</span></div>
+          <div class="metric"><strong>种子 → 拓扑</strong><span>研究意图约束已实现的公式生成器</span></div>
+          <div class="metric"><strong>DAG → 问题</strong><span>先固定证据与答案，再生成自然语言</span></div>
+          <div class="metric"><strong>执行 → 验收</strong><span>真实取证、证明回放和轨迹留档</span></div>
         </div>
+        <div class="toolbar">
+          <button type="button" id="expand-all">展开全部技术细节</button>
+          <button type="button" id="collapse-all">收起技术细节</button>
+          <button type="button" id="print-page">打印 / 导出 PDF</button>
+        </div>
+        <nav class="toc" aria-label="技术目录">
+          <a href="#overview">01 · 全链路与三类输入</a><a href="#raw">02 · 原始数据整理与血缘</a>
+          <a href="#facts">03 · 切块与事实抽取</a><a href="#seeds">04 · 种子如何影响合成</a>
+          <a href="#dag">05 · 实体汇合与答案 DAG</a><a href="#realization">06 · 问题生成与双重审计</a>
+          <a href="#atomic">07 · Atomic 局部能力分支</a><a href="#teacher">08 · 强模型 agent 与轨迹</a>
+          <a href="#products">09 · 数据产品与文件契约</a><a href="#quality">10 · 质量门、参数与指标</a>
+          <a href="#boundaries">11 · 已实现能力与边界</a><a href="#code-map">12 · 技术到代码的映射</a>
+        </nav>
       </div>
     </section>
 
-    <section>
-      <div class="wrap">
-        <div class="callout">
-          <div class="icon">◎</div>
-          <div><strong>先明确“单条数据”的含义。</strong>它是一条带 <code>text</code> 的输入记录，是追踪和抽取的起点，不是最终样本的固定单位。无有效事实时产出为 0；一个 chunk 可以产生多条 atomic 任务；一条记录中的事实也可以参与多个 long-horizon 图。</div>
-        </div>
-      </div>
-    </section>
-
-    <section id="lifecycle">
+    <section id="overview">
       <div class="wrap">
         <div class="section-head">
-          <div><div class="eyebrow">Shared front half</div><h2>所有任务共用的前半程</h2></div>
-          <p>这部分先解决输入是否可信、能否定位、是否重复，以及哪些句子可以成为后续推理的事实叶节点。</p>
+          <div><div class="eyebrow">A complete lifecycle</div><h2>01 · 全链路：三类信息，各司其职</h2></div>
+          <p>原始数据提供“有什么证据”，种子提供“研究什么类型的问题”，公式与 DAG 规定“怎样推导并验收答案”。三者合起来才形成可执行任务。</p>
         </div>
-
-        <div class="sample-grid">
-          <article class="card">
-            <h3>示意输入：JSONL 中的一行</h3>
-            <pre>{
-  "id": "report-a-2025",
-  "text": "A 公司 2025 年营业收入为 120 亿元，\n同比增长 20%。",
-  "title": "A 公司 2025 年年报",
-  "published_at": "2026-03-20",
-  "ticker": "000001"
-}</pre>
-            <p><small>此例假设配置了 <code>input.id_field: id</code>，并把 title、published_at、ticker 列入 <code>metadata_fields</code>。</small></p>
-          </article>
-          <article class="card">
-            <h3>规范化后保留的主干字段</h3>
-            <pre>{
-  "record_id": "稳定 ID",
-  "content_hash": "正文 SHA-256",
-  "text": "原始正文",
-  "source_uri": "文件绝对路径",
-  "source_locator_json": "行号/字节区间",
-  "external_id": "report-a-2025",
-  "metadata_json": "title/ticker/...",
-  "shuffle_partition": 17
-}</pre>
-          </article>
+        <div class="triple">
+          <article class="card"><h3>原始语料：事实供给</h3><p>JSONL / Parquet 中的正文与元数据。提供实体、期间、指标、披露值和证据 quote，保留文件、行号与字符区间。</p><p class="tag">决定可回答范围与证据真实性</p></article>
+          <article class="card"><h3>分析师种子：任务意图</h3><p>示范研究目标、推导形式、必需事实角色和时间敏感性。v3 在规划前将其编译到受支持的 generator。</p><p class="tag">决定候选任务类型与措辞参考</p></article>
+          <article class="card"><h3>公式注册表：可执行结构</h3><p>固定 generator、操作序列、版本与维度约束；事实成为叶节点，运算节点组合成可回放的答案图。</p><p class="tag">决定推导能力与确定性答案</p></article>
         </div>
-
-        <div class="flow" aria-label="共享数据处理流程">
-          <article class="stage">
-            <span class="number">1</span>
-            <h3>Catalog</h3>
-            <p>递归发现 JSONL/Parquet。JSONL 按字节范围规划，Parquet 按 row group 规划。</p>
-            <div class="pill-row"><span class="pill">input manifest</span><span class="pill">assignment</span></div>
-          </article>
-          <article class="stage">
-            <span class="number">2</span>
-            <h3>Normalize</h3>
-            <p>校验 object 与 text，形成稳定 ID、正文哈希、来源定位和物理分区键。</p>
-            <div class="pill-row"><span class="pill">data.parquet</span><span class="pill">quarantine</span></div>
-          </article>
-          <article class="stage">
-            <span class="number">3</span>
-            <h3>ID 全局校验</h3>
-            <p>相同 external ID 若对应多个正文哈希，相关记录整体隔离。</p>
-            <div class="pill-row"><span class="pill">conflicts.parquet</span></div>
-          </article>
-          <article class="stage">
-            <span class="number">4</span>
-            <h3>精确去重</h3>
-            <p>按 content hash 全局去重，并剔除已经确认的 ID 冲突。</p>
-            <div class="pill-row"><span class="pill">canonical record</span></div>
-          </article>
-          <article class="stage">
-            <span class="number">5</span>
-            <h3>语义切块</h3>
-            <p>默认 6,000 字符、400 字符重叠；每块保留正文精确字符区间。</p>
-            <div class="pill-row"><span class="pill">chunk_id</span><span class="pill">offsets</span></div>
-          </article>
-          <article class="stage">
-            <span class="number">6</span>
-            <h3>事实抽取</h3>
-            <p>抽取 entity、period、metric、value、单位、币种和逐字 quote，并校验证据位置。</p>
-            <div class="pill-row"><span class="pill">fact_id</span><span class="pill">facts.parquet</span></div>
-          </article>
+        <div class="flow" aria-label="从输入到任务与轨迹的六组流程">
+          <article class="stage"><span class="number">1</span><h3>整理原文</h3><p>输入清单 → normalize → 全局 ID 冲突检查 → 正文精确去重</p><div class="pill-row"><span class="pill">records</span></div></article>
+          <article class="stage"><span class="number">2</span><h3>抽取证据事实</h3><p>语义切块 → extractor → quote / 数字定位 → facts</p><div class="pill-row"><span class="pill">chunks</span><span class="pill">facts</span></div></article>
+          <article class="stage"><span class="number">3</span><h3>规划答案图</h3><p>实体解析 → 重分区 → 种子约束 → 公式候选 → DAG 回放</p><div class="pill-row"><span class="pill">graph_planning</span></div></article>
+          <article class="stage"><span class="number">4</span><h3>生成并审核问题</h3><p>去答案的语义摘要 → constructor → auditor → 确定性 validation</p><div class="pill-row"><span class="pill">validated task</span></div></article>
+          <article class="stage"><span class="number">5</span><h3>形成两类数据</h3><p>纯 query + 隐藏校验；按需由教师执行任务，采集合格 messages</p><div class="pill-row"><span class="pill">query_export</span><span class="pill">sft_prepare</span></div></article>
+          <article class="stage"><span class="number">6</span><h3>统一发布</h3><p>质量阈值 → train / val → 轨迹索引 → 文件校验清单</p><div class="pill-row"><span class="pill">export</span><span class="pill">_PUBLISHED</span></div></article>
         </div>
-
+        <div class="ribbon"><b>分支依赖关系：</b>facts 后还可生成 Atomic 任务；冻结 corpus / retrieval index 从 chunks 与实体信息构建。<code>query_export</code> 和 <code>sft_prepare</code> 均消费合格任务与索引，query 导出不等待教师成功；最终 export 汇总启用的产物。运行器按计划顺序执行阶段。</div>
+        <p class="caption">这里画的是数据流。工程调度也有阶段依赖 DAG，任务本身还有证据 DAG，两者含义不同。详细模块与 Linux 调度方式见 <a href="project-architecture.html">工程架构</a>。</p>
         <details>
-          <summary>什么情况下这条记录会在前半程被隔离？</summary>
-          <div>缺少或错误类型的 <code>text</code>、正文超过配置上限、JSONL 单行超过字节上限、external ID 与另一正文冲突，或事实抽取结果不能被原文 quote 与字符区间支持。记录级错误进入 <code>quarantine.parquet</code>；系统级 I/O 或输入指纹变化会让 shard 失败。</div>
+          <summary>技术细节：LLM 与确定性代码分别承担什么</summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>角色 / 组件</th><th>输入</th><th>职责与输出</th></tr></thead>
+              <tbody>
+                <tr><td>extractor</td><td>单个原文 chunk</td><td>提出 facts 候选；代码验证 quote、数值和定位</td></tr>
+                <tr><td>entity_resolver</td><td>有限歧义 block 的 surface 与证据</td><td>在规则无法确定时补充聚类；输出必须完整覆盖输入名称</td></tr>
+                <tr><td>constructor</td><td>Atomic 的 context / facts，或长程 seed / 图摘要</td><td>Atomic 候选问题与图；长程自然语言 query；必要时补充 same_metric 关系</td></tr>
+                <tr><td>auditor</td><td>私有候选、证据、答案与任务要求</td><td>提供语义审核 verdict，不替代确定性校验</td></tr>
+                <tr><td>teacher</td><td>Atomic 的 context / question，或长程公开状态 / 工具结果</td><td>实际生成结构化证明，或执行 agent loop</td></tr>
+                <tr><td>规则 planner / replay / verifier</td><td>种子约束、注册公式、事实、教师证明</td><td>构图、Decimal 回放、证据绑定、数值与结构验收；这些步骤由代码执行</td></tr>
+              </tbody>
+            </table>
+          </div>
         </details>
       </div>
     </section>
 
-    <section id="branches">
+    <section id="raw">
       <div class="wrap">
         <div class="section-head">
-          <div><div class="eyebrow">Two products</div><h2>事实抽取后，分成两条合成产线</h2></div>
-          <p>两条产线共享可定位事实，但上下文形式、组合范围和难度约束不同，最后在 validation 阶段重新汇合。</p>
+          <div><div class="eyebrow">Grounding and provenance</div><h2>02 · 原始数据如何进入系统</h2></div>
+          <p>一条输入记录可以产生零到多条任务；长程任务会组合多份记录的事实。文件、记录、chunk、fact 和 task 各有独立 ID。</p>
         </div>
+        <div class="sample-grid">
+          <article class="card">
+            <h3>贯穿示例：两份已公开的年度披露</h3>
+            <pre data-format="json">{
+  "id": "demo-2025",
+  "text": "云帆科技2025年营业利润为18亿元，营业收入为120亿元。",
+  "title": "云帆科技2025年度披露",
+  "ticker": "DEMO001",
+  "published_at": "2026-03-20"
+}</pre>
+            <pre data-format="json">{
+  "id": "demo-2024",
+  "text": "云帆科技2024年营业利润为12亿元，营业收入为100亿元。",
+  "title": "云帆科技2024年度披露",
+  "ticker": "DEMO001",
+  "published_at": "2025-03-20"
+}</pre>
+            <p class="caption">演示中设 <code>input.id_field: id</code>，元数据保留 title / ticker / published_at，截止日为 <code>2026-09-29</code>。公司和数据均为虚构。原始 PDF / 网页的下载、OCR、表格解析需要在上游完成，本项目从整理后的文本记录开始。</p>
+          </article>
+          <article class="card">
+            <h3>除正文之外，还需要哪些输入</h3>
+            <ul>
+              <li><b>来源元数据：</b>title、URL、ticker / CIK / LEI、发布日期。元数据只能保留输入中原本存在的信息。</li>
+              <li><b>种子 JSONL：</b><code>query_realization.seed_file</code>，可选；未指定时使用内置近似种子。</li>
+              <li><b>公式 YAML：</b><code>dag.formula_registry</code>，默认 builtin；定义可执行模板及版本。</li>
+              <li><b>实体别名 YAML：</b><code>entity_resolution.alias_file</code>，可选；控制名称归并。</li>
+              <li><b>评测问题 JSONL：</b><code>quality.evaluation_file</code>，可选；只用于近重复排除，不作为合成示范或事实输入。</li>
+              <li><b>配置：</b>cutoff、角色模型、难度门槛、过滤标签、分片与输出位置。</li>
+            </ul>
+            <p class="caption">种子库、别名、公式与评测文件的内容指纹会纳入冻结计划。改变这些输入需要创建新计划。</p>
+          </article>
+        </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>步骤</th><th>具体处理</th><th>输出 / 失败去向</th></tr></thead>
+            <tbody>
+              <tr><td>发现与分片</td><td>遍历配置文件；JSONL 按字节段规划且读取时对齐换行，Parquet 按 row group 规划。记录文件与段指纹。</td><td>输入清单、normalize assignments</td></tr>
+              <tr><td>规范化</td><td>检查 JSON object、text 类型和长度；保存外部 ID、元数据 JSON、来源 locator 与正文 SHA-256。正文不被改写为模型摘要。</td><td><code>normalize/data.parquet</code>；坏记录进入 quarantine</td></tr>
+              <tr><td>外部 ID 校验</td><td>同一个 external ID 对应多个正文哈希时，将所有相关记录判为冲突；先按 ID 分区发现，避免内容分区漏检。</td><td><code>conflicts.parquet</code> + 隔离记录</td></tr>
+              <tr><td>全局精确去重</td><td>排除冲突 ID 后，按正文哈希保留按来源位置稳定排序的一个代表。相同正文不会因不同文件名重复进入 LLM。</td><td><code>dedup/data.parquet</code>；这一步不做语义近重复</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>技术细节：稳定 ID、分区和来源定位</summary>
+          <div>
+            <p><code>record_id</code> 在存在 external ID 时由该 ID 稳定生成；未配置 ID 时由 source URI、locator 和 content hash 共同生成。事实阶段令 <code>source_id = record_id</code>。正文哈希用于去重，不能把 record_id 简写为正文哈希。</p>
+            <p>正文哈希先映射 <code>dedup_bucket</code>，再映射 <code>shuffle_partition</code>；external ID 使用独立分区键。Parquet 的大对象通常放在 envelope 的 JSON payload 中，外层稳定列支持分组、排序和 shuffle。</p>
+            <p>JSONL locator 包含行号及字节位置；Parquet locator 包含 row group 与行位置；chunk / fact 增加原文字符区间。字节位置与 Unicode 字符位置不能混用。</p>
+            <p class="boundary">“至少两个独立来源”在当前实现中指至少两个去重后 <code>source_id</code>，不等于两个独立出版机构。精确去重也不能识别所有转载或语义改写。</p>
+          </div>
+        </details>
+        <div class="trace" style="margin-top:18px" aria-label="数据血缘链">
+          <div class="trace-item"><strong>source_uri</strong><small>输入文件位置</small></div>
+          <div class="trace-item"><strong>source_locator</strong><small>行 / 字节 / row group</small></div>
+          <div class="trace-item"><strong>record_id</strong><small>规范化记录与正文哈希</small></div>
+          <div class="trace-item"><strong>chunk_id</strong><small>原文字符范围</small></div>
+          <div class="trace-item"><strong>fact_id</strong><small>逐字引文与金融维度</small></div>
+          <div class="trace-item"><strong>graph_id / task_id</strong><small>公式、答案图与问题</small></div>
+        </div>
+        <p class="source">实现：<a href="../src/mint_synth/storage/catalog.py">catalog.py</a><a href="../src/mint_synth/storage/records.py">records.py</a><a href="../src/mint_synth/workflow/stages/ingest.py">ingest.py</a></p>
+      </div>
+    </section>
 
+    <section id="facts">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Extract, localize, validate</div><h2>03 · 从原文到可计算事实</h2></div>
+          <p>extractor 只负责提出候选事实；代码检查逐字证据与显式值，再分配 fact_id。原文没有出现的计算结果不能提前伪装成披露事实。</p>
+        </div>
+        <div class="sample-grid">
+          <article class="card">
+            <h3>切块与抽取规则</h3>
+            <ol>
+              <li>按段落、换行与标点边界启发式切块，默认最大 <b>6,000 字符</b>、重叠 <b>400 字符</b>、目标最小 <b>600 字符</b>；短文仍可成为一个 chunk。这一步不使用 embedding 聚类。</li>
+              <li>extractor 每块返回最多 <b>30 个</b>候选，字段包括 entity、period、metric、value_num / value_text、unit / scale / currency、fact_type、quote。</li>
+              <li>quote 必须是 chunk 的精确子串；value_num 必须与 quote 中显式数字匹配；value_text 必须是保真子串。</li>
+              <li>由 chunk 起点加 quote 的局部位置，得到原文全局字符区间；fact_id 包含来源、区间、实体、期间、指标、值和维度信息。</li>
+              <li>同一记录的重叠 chunk 若生成相同 fact_id，会再次去重。非数值事实可服务 Atomic，规则 DAG 只选可解析数值事实。</li>
+            </ol>
+          </article>
+          <article class="card">
+            <h3>事实示例：2025 年营业利润</h3>
+            <pre data-format="json">{
+  "fact_id": "F25P",
+  "source_id": "S25",
+  "chunk_id": "C25",
+  "entity": "云帆科技",
+  "period": "2025",
+  "metric": "营业利润",
+  "value_num": "18",
+  "value_text": null,
+  "unit": "元",
+  "scale": "亿",
+  "currency": "CNY",
+  "fact_type": "reported",
+  "quote": "云帆科技2025年营业利润为18亿元",
+  "locator": {"char_start": 0, "char_end": 18}
+}</pre>
+            <p class="caption">F25P / S25 / C25 是为讲解缩短的 ID；实际系统用稳定哈希 ID，locator 还保留文件来源字段。</p>
+          </article>
+        </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>讲解用 fact_id</th><th>source</th><th>期间</th><th>metric</th><th>显式值</th><th>维度</th><th>后续角色</th></tr></thead>
+            <tbody>
+              <tr><td>F25P</td><td>S25</td><td>2025</td><td>营业利润</td><td>18</td><td>元 / 亿 / CNY</td><td>新期间分子</td></tr>
+              <tr><td>F25R</td><td>S25</td><td>2025</td><td>营业收入</td><td>120</td><td>元 / 亿 / CNY</td><td>新期间分母</td></tr>
+              <tr><td>F24P</td><td>S24</td><td>2024</td><td>营业利润</td><td>12</td><td>元 / 亿 / CNY</td><td>旧期间分子</td></tr>
+              <tr><td>F24R</td><td>S24</td><td>2024</td><td>营业收入</td><td>100</td><td>元 / 亿 / CNY</td><td>旧期间分母</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="boundary">数值和引文定位检查能阻止许多幻觉，但不能证明模型识别的指标、单位、实体和期间一定正确。维度兼容、语义 auditor 与人工抽样仍然必要；当前系统不会自动把任意币种、金额倍率或会计口径换算为一致。</p>
+        <p class="source">实现：<a href="../src/mint_synth/storage/chunking.py">chunking.py</a><a href="../src/mint_synth/synthesis/extract.py">extract.py</a><a href="../src/mint_synth/workflow/stages/facts.py">facts.py</a></p>
+      </div>
+    </section>
+
+    <section id="seeds">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Seed as intent and constraints</div><h2>04 · 种子如何真正参与合成</h2></div>
+          <p>种子是任务规格来源：它在 DAG 规划前生效，也在问题实现和去复制审核时使用。最终数值来自原文事实与图回放。</p>
+        </div>
+        <div class="sample-grid">
+          <article class="card">
+            <h3>用于贯穿示例的自定义种子</h3>
+            <pre data-format="json">{
+  "seed_id": "seed_margin_change",
+  "seed_query": "比较同一公司的两个报告期营业利润率，给出变动的绝对幅度。",
+  "task_spec_template": {
+    "objective_type": "change",
+    "reasoning_form": "retrieve a same-scope ratio across periods and compute its absolute change",
+    "required_fact_roles": [
+      "new_period_numerator",
+      "new_period_denominator",
+      "old_period_numerator",
+      "old_period_denominator"
+    ],
+    "time_sensitive": false,
+    "requested_output": "absolute magnitude of the operating margin change"
+  },
+  "origin": "user_seed_bank"
+}</pre>
+            <p class="caption">实际 seed 文件是 JSONL，每条对象占一行。此处展开排版。配置 <code>query_realization.seed_file: /data/seeds/analyst.jsonl</code> 后使用。</p>
+          </article>
+          <article class="card">
+            <h3>从种子到具体任务的五步</h3>
+            <ol>
+              <li><b>加载：</b>读取 seed_id、seed_query、task_spec_template、origin；未给 ID 时稳定生成。</li>
+              <li><b>预校验：</b>v3 自定义种子必须带完整 template；检查 objective_type、reasoning_form 与 required_fact_roles 是否能映射到已实现 generator。</li>
+              <li><b>编译约束：</b>本例的 change + ratio change + 四角色映射到 <code>ratio_change</code>，再选择注册公式 <code>temporal_ratio_change</code>。</li>
+              <li><b>约束规划：</b>只对匹配拓扑和时间要求的事实构图；之后仍需满足深度、来源数和回放门。</li>
+              <li><b>实现问题：</b>保留 seed 与具体 task_spec；constructor 参考种子意图和图摘要写问题，auditor 检查未照抄种子。</li>
+            </ol>
+            <p class="boundary">本例四事实比率变化需要上面的自定义种子。<code>seed_file: null</code> 的内置种子不会自动覆盖全部注册公式。</p>
+          </article>
+        </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>种子意图 / 推导形式</th><th>映射 generator</th><th>可用结构</th><th>当前约束</th></tr></thead>
+            <tbody>
+              <tr><td>change + 跨两期间变化</td><td>temporal_pair</td><td>新值与旧值相减 / 百分比变化，再取幅度</td><td>内置 seed_change 可选择</td></tr>
+              <tr><td>change + 三期 trend</td><td>temporal_trend</td><td>三事实、两次差分、均值、幅度</td><td>需要相应自定义种子</td></tr>
+              <tr><td>change + ratio change</td><td>ratio_change</td><td>两期各形成比率，再求差与幅度</td><td>需要相应自定义种子；本页示例</td></tr>
+              <tr><td>ratio / aggregation</td><td>compatible_ratio / compatible_average</td><td>两个兼容值的比率 / 均值</td><td>深度为 1，被默认 min_depth=2 排除</td></tr>
+              <tr><td>verification + 多部分布尔组合</td><td>multi_verification</td><td>三来源 equals 分支，再 and</td><td>内置 seed_verify 对应该结构</td></tr>
+              <tr><td>comparison</td><td>当前无对应 generator</td><td>未实现自由比较拓扑</td><td>内置近似 comparison 种子跳过；不支持的自定义规格报错</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>技术细节：种子能力、筛选和回退的准确边界</summary>
+          <div>
+            <p><code>reasoning_form</code> 当前通过受约束的英文关键词与 objective_type 映射；required_fact_roles 经大小写、标点和下划线归一化后与允许的角色及顺序校验。这是规格编译规则，不能把任意自然语言种子当作可执行新算法。</p>
+            <p>种子不会提供 gold answer，不会直接复制旧任务答案，也不会自动生成任意复杂 DAG。当前 role 约束限制角色结构，并不把“营业利润”这样的业务指标名强制绑定到任意分子位置；具体指标仍来自公式候选匹配与语义审核。</p>
+            <p>种子顶层的 <code>time_scope</code>、<code>financial_topic</code> 不是当前加载器消费的字段。时间控制来自 run.cutoff 与 template.time_sensitive；金融主题由任务指标关键词派生，再由 training.financial_topics 筛选。</p>
+            <p><code>training.seed_ids</code>、objective_types、formula_ids 等白名单会影响候选与后续导出；<code>seed_fallback: true</code> 且指定自定义 seed_file 时可补入内置种子，默认关闭。这个配置改变任务来源范围，不能作为静默放宽质量门。</p>
+            <p>类中保留的旧 <code>LongHorizonSynthesizer.synthesize()</code> 能让 LLM 先提图，但当前 v3 stage 主路径是 <b>seed 约束 → RuleDagPlanner → query_realization</b>，不应将旧方法调用顺序当作现行流水线。</p>
+          </div>
+        </details>
+        <p class="source">实现：<a href="../src/mint_synth/synthesis/long_horizon.py">seed loader / 内置种子</a><a href="../src/mint_synth/synthesis/seed_constraints.py">seed_constraints.py</a><a href="../src/mint_synth/workflow/stages/questions.py">graph_planning / query_realization</a></p>
+      </div>
+    </section>
+
+    <section id="dag">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Evidence crossover and answer-first planning</div><h2>05 · 同一实体的事实，如何变成答案 DAG</h2></div>
+          <p>跨来源组合发生在 canonical entity 范围内。证据 DAG 描述答案的依赖和运算；它不是预先规定教师必须执行的检索路径。</p>
+        </div>
+        <div class="triple">
+          <article class="card"><h3>① 解析与汇合主体</h3><p>强标识符 → 版本化 alias → 名称规范化 → 受约束的 LLM 歧义回退。相同 surface 的强标识冲突进入隔离。</p><p>解析后按 canonical_entity_id 哈希重分区，让散落不同文件和 shard 的同主体事实进入同一个 planner。</p></article>
+          <article class="card"><h3>② 枚举受约束候选</h3><p>选择显式数值事实，按 generator 匹配指标、期间类型、单位、倍率、币种与来源宽度。年、季、半年和点时日期不会混配。</p><p>种子限定可用公式。候选扫描上限与有效候选 beam 分开，坏候选不会提前占完有效名额。</p></article>
+          <article class="card"><h3>③ 执行与排序</h3><p>fact 节点指向现有 fact_id；operation 节点引用父节点。Decimal 执行后检查深度、来源数与完整祖先。</p><p>规范图连同公式 ID / 版本生成稳定 graph_id；候选优先更多来源、更深结构，再稳定排序截断。</p></article>
+        </div>
+        <h3 style="margin-top:26px">贯穿示例：营业利润率的变动幅度</h3>
+        <div class="dag-example" role="img" aria-label="四个事实分别计算2025与2024营业利润率，再求差和绝对值，答案0.03">
+          <div class="dag-col">
+            <div class="node fact"><b>F25P · S25</b><br>2025 营业利润 = 18</div>
+            <div class="node fact"><b>F25R · S25</b><br>2025 营业收入 = 120</div>
+            <div class="node fact"><b>F24P · S24</b><br>2024 营业利润 = 12</div>
+            <div class="node fact"><b>F24R · S24</b><br>2024 营业收入 = 100</div>
+          </div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="dag-col">
+            <div class="node op"><b>new_ratio</b><br>ratio(F25P, F25R)<br>= 0.15</div>
+            <div class="node op"><b>old_ratio</b><br>ratio(F24P, F24R)<br>= 0.12</div>
+          </div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="dag-col">
+            <div class="node op"><b>ratio_delta</b><br>subtract(new, old) = 0.03</div>
+            <div class="node answer"><b>magnitude · terminal</b><br>abs(ratio_delta) = 0.03</div>
+          </div>
+        </div>
+        <p class="formula">|18 ÷ 120 − 12 ÷ 100| = 0.03 ratio = 3 个百分点</p>
+        <p>该图有 <b>4 个事实叶、4 个运算节点、2 个 source_id、3 层操作深度</b>。两期各自的分子和分母可来自同一份年报；来源数按全图去重计算。<code>0.03 ratio</code> 是利润率差的绝对幅度；若问相对增长率，需另一种明确推导，不能把这里的结果写成“增长 3%”。</p>
+        <p class="caption">上面的内存事实组合已用当前 RuleDagPlanner 与 replay_graph 验证，得到 value="0.03"、unit="ratio"、scale=null、currency=null；不代表已完成真实模型抽取与教师执行联调。</p>
+        <details>
+          <summary>技术细节：可执行 DAG 数据结构与回放门</summary>
+          <div>
+            <pre data-format="json">{
+  "nodes": [
+    {"id":"fact_0","kind":"fact","fact_id":"F25P"},
+    {"id":"fact_1","kind":"fact","fact_id":"F25R"},
+    {"id":"fact_2","kind":"fact","fact_id":"F24P"},
+    {"id":"fact_3","kind":"fact","fact_id":"F24R"},
+    {"id":"new_ratio","kind":"operation","op":"ratio","inputs":["fact_0","fact_1"],"unit":"ratio","scale":null,"currency":null},
+    {"id":"old_ratio","kind":"operation","op":"ratio","inputs":["fact_2","fact_3"],"unit":"ratio","scale":null,"currency":null},
+    {"id":"ratio_delta","kind":"operation","op":"subtract","inputs":["new_ratio","old_ratio"]},
+    {"id":"magnitude","kind":"operation","op":"abs","inputs":["ratio_delta"]}
+  ],
+  "terminal_id": "magnitude"
+}</pre>
+            <p>回放拒绝未知事实 / 节点、环、非法重复输入、除零、非有限数值和维度不兼容；图中所有节点都必须是 terminal 的祖先。声明 evidence_ids 必须与实际事实祖先完全相等，不能靠多挂证据或断开的深节点凑难度。</p>
+            <p>深度从事实叶 0 开始，operation 深度为父节点最大深度加 1；例中 ratio=1、subtract=2、abs=3。来源数只统计 terminal 真正依赖的事实来源。</p>
+            <p>本例“营业利润 / 营业收入”能形成该方向，依赖当前指标归一化名称排序恰好使利润排在收入前。ratio_change 生成器不会从任意 seed 文本自动理解并强制绑定财务分子 / 分母；不合理配对仍应由语义 auditor 拒绝。</p>
+          </div>
+        </details>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>注册 formula_id</th><th>generator / 运算结构</th><th>操作深度</th><th>默认条件下的说明</th></tr></thead>
+            <tbody>
+              <tr><td>temporal_absolute_change</td><td>temporal_pair：subtract → abs</td><td>2</td><td>同指标、两期间；幅度</td></tr>
+              <tr><td>temporal_percent_change</td><td>temporal_pair：percent_change → abs</td><td>2</td><td>以旧值为基准；旧值为零拒绝</td></tr>
+              <tr><td>cross_source_ratio</td><td>compatible_ratio：ratio</td><td>1</td><td>被默认最小深度过滤</td></tr>
+              <tr><td>cross_source_average</td><td>compatible_average：average</td><td>1</td><td>被默认最小深度过滤</td></tr>
+              <tr><td>cross_source_verification</td><td>compatible_verification：equals</td><td>1</td><td>被默认最小深度过滤</td></tr>
+              <tr><td>three_period_trend</td><td>temporal_trend：两个 subtract 分支 → average → abs</td><td>3</td><td>需三期事实及匹配自定义种子</td></tr>
+              <tr><td>temporal_ratio_change</td><td>ratio_change：两个 ratio 分支 → subtract → abs</td><td>3</td><td>需四事实及匹配自定义种子</td></tr>
+              <tr><td>multi_source_verification</td><td>multi_verification：两个 equals 分支 → and</td><td>2</td><td>需三个来源的兼容观察</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>技术细节：候选不足时 LLM 做什么，哪些操作不能靠改 YAML 获得</summary>
+          <div>
+            <p>当规则候选低于配置下限，constructor 可补充 <code>same_metric</code> 关系。它必须引用已有的确切 fact_id；关系经校验后仍交给同一个类型化规则 planner。LLM 不直接决定自由算式或改写披露值。</p>
+            <p>默认允许 subtract、percent_change、ratio、average、abs、equals、and；公式注册表还限制 generator 与 operation 序列的合法搭配。自定义 YAML 可以启用 / 版本化已支持结构，但不能仅靠写一个任意新 generator 或 operation 链扩展执行能力。</p>
+            <p><code>min_depth=2</code>、<code>max_depth=4</code> 是门槛。当前内置拓扑实际为 1–3 层，默认合格图为 2–3 层；提高 max_depth 不会自动产生更长研究链。DAG 深度也不等于模型调用轮数或工具步数。</p>
+          </div>
+        </details>
+        <p class="source">实现：<a href="../src/mint_synth/synthesis/entity.py">entity.py</a><a href="../src/mint_synth/synthesis/dag.py">dag.py</a><a href="../src/mint_synth/resources/formulas.default.yaml">内置公式注册表</a><a href="../src/mint_synth/synthesis/replay.py">replay.py</a></p>
+      </div>
+    </section>
+
+    <section id="realization">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Realize only after replay</div><h2>06 · 从答案图到自然语言研究问题</h2></div>
+          <p>问题表述可以由模型变化，但图、证据和答案已经固定。独立语义 auditor 与确定性程序分别处理不同类型的错误。</p>
+        </div>
+        <div class="sample-grid">
+          <article class="card">
+            <h3>constructor 看见什么</h3>
+            <p>seed、具体 task_spec、cutoff、语言要求，以及不含事实 / 来源 ID、locator 和披露数值的 graph_summary。摘要含实体、期间、指标、事实角色、公式和 operation_count。</p>
+            <p>本例问题可以实现为：</p>
+            <div class="ribbon">“根据云帆科技年度披露，2025 年相对 2024 年的营业利润率绝对变动幅度是多少？请以比率小数表示并给出依据。”</div>
+            <p>问题应固定对象、期间、口径与 requested_output；最终 query 不附答案、证据正文或隐藏图。</p>
+          </article>
+          <article class="card">
+            <h3>两类审核如何配合</h3>
+            <ul>
+              <li><b>语义 auditor：</b>支持性、唯一性、金融含义、不泄漏、未复制 seed。它可以看到私有证据和答案作审核。</li>
+              <li><b>本地确定性门：</b>重新执行 DAG，核对 evidence 集合、答案值与 unit / scale / currency、深度和来源数。</li>
+              <li><b>表述检查：</b>长度、内部 ID / 来源 locator 泄漏、披露数字或答案泄漏、与种子 / 评测题近重复；语义审核另检查来源细节暴露和表述问题。</li>
+              <li><b>最终 validation：</b>对 Atomic / long_horizon 成品再运行确定性审计，输出 accepted / rejected 与原因。</li>
+            </ul>
+          </article>
+        </div>
+        <details>
+          <summary>技术细节：时间截断、评测去污染与审核失败</summary>
+          <div>
+            <p><b>cutoff 不是把所有原始语料先删掉：</b>normalize / dedup / facts 不按日期裁剪；v3 graph_planning 排除来源可用日期晚于 cutoff 的 facts，query_realization 再检查一次。普通任务可保留无有效日期证据；time_sensitive 任务要求全部证据有日期，且问题显式包含 cutoff 字符串。</p>
+            <p>冻结 corpus 同样排除未来 chunks，记录但保留 undated chunks；time_sensitive 执行再启用 dated_only。指定 available_at_field 缺失或非法时视为 undated；该字段有效时再与 published_at 的有效日期比较取较晚时间，避免把报告期当作公开可用日。</p>
+            <p><code>evaluation_file</code> 支持 question / prompt / text 字段，构建本地 QuestionIndex；按项目的文本近重复度阈值 <code>overlap_threshold=0.82</code> 排除相似问题。它是基于文本重合的门，不能宣称排除所有语义污染；未配置评测集时无法执行该项对照。</p>
+            <p>独立语义 auditor 必须通过 answer_unique、fully_supported、financially_valid、non_exposing、seed_not_copied 五项。<code>require_independent_auditor: true</code> 要求 constructor 与 auditor 的模型身份不同，但不能保证两个模型不会共同出错。</p>
+            <p>候选不合格时被过滤；抽取、LLM 调用、问题审核等阶段有相应 quarantine 或汇总统计，规则枚举内的淘汰不保证逐候选留档。当前流程不会让 auditor 自动修复候选后直接放行。合格任务量与失败比例仍需满足发布门槛。</p>
+          </div>
+        </details>
+        <p class="source">实现：<a href="../src/mint_synth/workflow/stages/questions.py">questions.py</a><a href="../src/mint_synth/synthesis/audit.py">audit.py</a><a href="../src/mint_synth/synthesis/decontamination.py">decontamination.py</a><a href="../src/mint_synth/harness/snapshot.py">snapshot.py</a></p>
+      </div>
+    </section>
+
+    <section id="atomic">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">A second synthesis branch</div><h2>07 · Atomic：给定上下文的局部能力数据</h2></div>
+          <p>Atomic 与长程任务共享抽取事实，但不进行同一实体多来源检索任务的规划。它在单个 chunk 内构造局部问题，并给教师直接提供 context。</p>
+        </div>
         <div class="branches">
           <article class="branch atomic">
-            <div class="branch-head">
-              <h3>Atomic：单 chunk 内的能力任务</h3>
-              <p>用户输入中带原文 context，目标是训练知识、抽取、计算、分析或验证等局部能力。</p>
-            </div>
+            <div class="branch-head"><h3>任务构造</h3><p>chunk + 本块 facts → constructor → 图回放 → auditor → 本地复核</p></div>
             <div class="branch-body">
-              <div class="mini-flow">
-                <div class="mini-step"><b>A1</b><div><b>选择 chunk 与本块 facts</b><small>默认每个 chunk 尝试构造 2 条任务，能力类型按稳定规则轮换。</small></div></div>
-                <div class="mini-step"><b>A2</b><div><b>Constructor 生成候选</b><small>输出 question、answer、evidence_ids、evidence_graph 和 reasoning_trace。</small></div></div>
-                <div class="mini-step"><b>A3</b><div><b>本地预回放</b><small>图必须只引用已抽取 fact_id，运算结果必须可由 Decimal 执行。</small></div></div>
-                <div class="mini-step"><b>A4</b><div><b>独立 Auditor</b><small>检查答案是否被证据支持、问题是否清楚、推理是否泄漏内部字段。</small></div></div>
-                <div class="mini-step"><b>A5</b><div><b>确定性复核</b><small>重新回放图并校验答案、证据集合、数值维度与推理步骤。</small></div></div>
-              </div>
+              <p>默认每个 chunk 尝试 <b>2 条</b>任务，稳定轮换 knowledge、extraction、calculation、analysis、verification 五类能力。候选含 input.context / question、answer、evidence_ids、evidence_graph、reasoning_trace。</p>
+              <p>本地图只允许引用当前提供的 facts；检查答案、维度、推理轨迹与证据一致性。无有效事实、构造失败或审计不通过时，该 chunk 可不产生样本。</p>
             </div>
           </article>
-
           <article class="branch long">
-            <div class="branch-head">
-              <h3>Long-horizon：同一实体的多来源任务</h3>
-              <p>问题本身不附原文 context，任务通过 source pack 关联多份证据，并要求先固定答案图。</p>
-            </div>
+            <div class="branch-head"><h3>教师证明生成</h3><p>context + question → 多个 proof 候选 → 严格证明校验 → 简洁候选</p></div>
             <div class="branch-body">
-              <div class="mini-flow">
-                <div class="mini-step"><b>L1</b><div><b>实体解析</b><small>强标识符 → alias → 规范化名称 → 受约束 LLM fallback。</small></div></div>
-                <div class="mini-step"><b>L2</b><div><b>按 canonical entity 重分区</b><small>同一主体散落在不同文件和原始 shard 的事实被送到同一个 planner。</small></div></div>
-              </div>
-              <div class="merge">本条记录的 facts ＋ 同一实体的其他来源 facts（默认至少 2 个 source_id）</div>
-              <div class="mini-flow">
-                <div class="mini-step"><b>L3</b><div><b>公式规划 DAG</b><small>匹配期间、metric、unit、scale、currency 与来源宽度，构造类型化图。</small></div></div>
-                <div class="mini-step"><b>L4</b><div><b>确定性回放答案</b><small>先计算 terminal，拒绝除零、维度冲突、断开节点和伪深度。</small></div></div>
-                <div class="mini-step"><b>L5</b><div><b>问题实现与审计</b><small>按 seed/task spec 生成自然问题，再由 auditor 与本地门共同验收。</small></div></div>
-              </div>
+              <p>默认每个 atomic teacher role 为每任务采样 <b>2 个</b>证明，保留通过隐藏图结构、值与 quote 校验的候选，再选最短合格 proof。</p>
+              <p>最终 user 内容包含 context 与 question，assistant 为教师实际生成的证明 JSON。默认 <code>atomic_audit_fallback=false</code>，不会在所有教师失败后直接用审计文本替代实际教师输出。</p>
             </div>
           </article>
         </div>
+        <p class="caption">Atomic 的 teacher JSON 生成与长程 agent_runtime 是两个接口；目前 native / strands / codex / claude_code 的 runtime 选择用于长程教师执行，不能写成 Atomic 同样经过四种 CLI agent loop。</p>
+        <p class="source">实现：<a href="../src/mint_synth/synthesis/atomic.py">atomic.py</a><a href="../src/mint_synth/sft/atomic_teacher.py">atomic_teacher.py</a><a href="../src/mint_synth/sft/formatting.py">formatting.py</a></p>
       </div>
     </section>
 
-    <section>
+    <section id="teacher">
       <div class="wrap">
         <div class="section-head">
-          <div><div class="eyebrow">Answer first</div><h2>长链任务的答案 DAG 示例</h2></div>
-          <p>示意为“四事实跨期比率变化”：先计算两个期间的比率，再计算变化幅度。自然语言问题在图通过回放之后才生成。</p>
+          <div><div class="eyebrow">Teacher execution and trace collection</div><h2>08 · 强模型 agent 如何生成长程轨迹</h2></div>
+          <p>合成任务已经有私有答案图；教师只收到 query、公开状态和工具定义，自行选择检索与计算过程。现有金融环境和校验器保持统一，执行 loop 可替换。</p>
         </div>
-        <div class="dag" role="img" aria-label="四个事实节点形成两个比率，两个比率相减后取绝对值形成答案">
-          <div class="dag-col">
-            <div class="node fact"><b>fact_0</b><br>新期间分子 · 来源 A</div>
-            <div class="node fact"><b>fact_1</b><br>新期间分母 · 来源 B</div>
-            <div class="node fact"><b>fact_2</b><br>旧期间分子 · 来源 A</div>
-            <div class="node fact"><b>fact_3</b><br>旧期间分母 · 来源 C</div>
-          </div>
-          <div class="arrow">→</div>
-          <div class="dag-col">
-            <div class="node op"><b>new_ratio</b><br>ratio(fact_0, fact_1)</div>
-            <div class="node op"><b>old_ratio</b><br>ratio(fact_2, fact_3)</div>
-          </div>
-          <div class="arrow">→</div>
-          <div class="dag-col">
-            <div class="node op"><b>ratio_delta</b><br>subtract(new, old)</div>
-            <div class="node answer"><b>terminal</b><br>abs(ratio_delta)</div>
-          </div>
+        <div class="proof-loop" aria-label="教师执行循环">
+          <div><strong>1 · 公开输入</strong><small>问题、可用工具、剩余预算；隐藏答案图不进入模型输入</small></div>
+          <div><strong>2 · search_corpus</strong><small>SQLite FTS5 检索同一实体、截止日前的冻结语料</small></div>
+          <div><strong>3 · open_chunk</strong><small>打开命中正文，取得可引用 quote，记录实际取证</small></div>
+          <div><strong>4 · calculate</strong><small>执行允许的计算；可继续检索与打开，直到预算终止</small></div>
+          <div><strong>5 · 最终证明</strong><small>提交 facts / steps / answer，私有 verifier 校验后决定接受</small></div>
         </div>
+        <p>上图是一条典型路径。教师可多次搜索、打开与计算，也可直接在证明中给出可回放步骤；<b>并不强制调用 calculate 才算完成</b>。成功标准是已取得必需证据并提交正确证明，而非输出一段看似合理的结论。</p>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>runtime</th><th>agent loop 与环境连接</th><th>所需模型协议</th><th>原始运行轨迹</th></tr></thead>
+            <tbody>
+              <tr><td>native</td><td>项目自有 JSON action loop → HarnessSession</td><td>OpenAI Chat Completions，JSON 动作</td><td>model.parsed.json + environment.json</td></tr>
+              <tr><td>strands</td><td>Strands Agent + 顺序工具执行 → FinanceToolBridge</td><td>OpenAI Chat Completions，原生 tool calling</td><td>agent.events.jsonl + agent.messages.json + HTTP capture</td></tr>
+              <tr><td>codex</td><td>Codex exec JSONL → 本地 finance MCP → 同一环境</td><td>OpenAI Responses API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
+              <tr><td>claude_code</td><td>Claude Code headless → 本地 finance MCP → 同一环境</td><td>Anthropic Messages API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="sample-grid" style="margin-top:18px">
+          <article class="card">
+            <h3>三层记录，分别回答不同问题</h3>
+            <ul>
+              <li><b>模型 HTTP：</b>请求、响应、SSE 原始字节和时间，解释模型实际收到和返回了什么。外部 runtime 自动经采集代理连接后端。</li>
+              <li><b>SDK / CLI：</b>事件、消息、退出状态、错误与超时，解释运行框架如何推进 agent loop。</li>
+              <li><b>环境：</b>实际工具动作、observation、证据账本与私有 verdict，证明操作是否执行及证据是否取得。</li>
+            </ul>
+            <p class="caption">单靠 vLLM / SGLang 服务日志通常只能看模型调用侧；完整 agent 轨迹还需拼接工具与环境执行记录。运行 ID、attempt 引用与文件索引负责关联。</p>
+          </article>
+          <article class="card">
+            <h3>统一验收，执行路径各自保留</h3>
+            <p>外部 runtime 通过保留工具 <code>submit_final(proof)</code> 提交；native 使用 final 动作。桥接器将提交转成同一 session.step()，更新预算并调用私有证明校验。</p>
+            <p>最终 proof 的固定结构为 <code>answer / facts / constants / steps / terminal</code>；事实必须来自已打开 chunk 的逐字 quote，步骤应覆盖隐藏 gold DAG 的操作、输入顺序和维度。</p>
+            <p>预算耗尽、未知工具、未提交、答案错误、缺少证据或证明结构不匹配都会被拒绝。自然语言结束或 CLI 返回 0 本身不足以接收样本。</p>
+          </article>
+        </div>
+        <details>
+          <summary>技术细节：冻结检索、教师采样、mask 与运行边界</summary>
+          <div>
+            <p><b>检索：</b>corpus_index 保存截止日前及无有效日期的 chunks；retrieval_index 依实体事实建立 source 与 canonical_entity_id 的关联，复制关联来源的完整 chunks，包含未抽取出事实的片段，并建立 SQLite FTS5 trigram 索引，必要时使用 LIKE 回退。当前实现没有 embedding / 向量数据库。检索和打开限制 canonical_entity_id、cutoff，时间敏感任务另要求 dated_only。</p>
+            <p><b>工具契约：</b>search_corpus(query, limit) 最多返回 10 条，带 chunk_id、source_id、日期和前 350 字符 snippet；open_chunk 只能打开之前搜索命中的 chunk，返回完整正文。calculate(operation, values) 支持 add / subtract / multiply / divide / percent_change / average，values 为 2–12 个数；它的操作集与隐藏 DAG replay 不完全相同，例如比率可用 divide 求值，最终 proof 仍按 gold 的 ratio 操作描述。</p>
+            <p><b>上下文：</b>native 将公开状态按 max_context_chars 打包；Strands 和 CLI 使用各自消息历史管理，因此不同 runtime 的模型可见上下文与行为不完全一致。不能直接承诺迁移 runtime 会提高合格率。</p>
+            <p><b>采样：</b>长程按 long_teacher_roles 轮换尝试，总次数受 rollouts_per_task 限制；出现首条合格轨迹即停止。它不是对每种 runtime 完整采样后再全局择优。失败 / 超时尝试也记录在 trajectory-index 与 audit 引用中。</p>
+            <p><b>输出 mask：</b>规范化 long messages 中 system、user、tool_response 的 loss 为 false，最终证明为 true；tool_call 的 loss 来自 step_relevance。启发式会屏蔽重复动作、未新增搜索结果 / 证据的动作；search / open 还参考必需 chunk，calculate 默认可判相关。这不是对所有无用计算的完美识别。</p>
+            <p><b>证明严格性：</b>proof 必须覆盖整张 gold DAG，op、输入顺序、params、步骤值与维度均需匹配；所有 answer / fact / step 的 unit、scale、currency 都要显式填写，空值也需为 null。当前验证器不接受任意代数等价的替代推导。</p>
+            <p><b>隔离：</b>Strands 顺序调用桥接器；CLI 使用临时 HOME、工作目录与专用 finance MCP，限制内置工具并审计事件；session / SQLite 归属专门线程。Linux 超时终止 CLI 进程组，Strands 取消任务并冻结已记录轨迹。自定义 Python 工具仍需自身有界超时。</p>
+            <p><b>协议：</b>同样是自部署模型，提供 /chat/completions 不代表已满足 Codex Responses 或 CC Anthropic Messages 的要求。后端须匹配 chat template、tool parser、流式事件与所需协议；当前项目不自动实现这些协议之间的通用转换。</p>
+            <p><b>记录范围：</b>HTTP 采集只保留服务实际返回的数据，无法恢复模型未公开的内部思维、未返回的 token IDs 或 logprobs。native 的 parsed 记录可能来自项目请求缓存，不应称为完整原始 wire capture。</p>
+          </div>
+        </details>
+        <p class="source">实现：<a href="../src/mint_synth/harness/session.py">session.py</a><a href="../src/mint_synth/harness/verifier.py">verifier.py</a><a href="../src/mint_synth/agents/collector.py">collector.py</a><a href="../src/mint_synth/agents/cli_runtime.py">cli_runtime.py</a><a href="teacher-runtimes.md">runtime 配置说明</a><a href="agent-tracing.md">轨迹采集说明</a></p>
       </div>
     </section>
 
-    <section>
+    <section id="products">
       <div class="wrap">
         <div class="section-head">
-          <div><div class="eyebrow">Provenance chain</div><h2>从成品可以追溯回原始行</h2></div>
-          <p>这些 ID 逐层固定数据血缘；最终任务中的 evidence_ids 与 terminal 的事实祖先必须完全相等。</p>
+          <div><div class="eyebrow">Public samples and private audit artifacts</div><h2>09 · 最终交付哪些数据</h2></div>
+          <p>合成任务、纯 query、教师 messages 和原始轨迹分别保留。私有答案与校验信息有独立文件契约，避免混入模型输入。</p>
         </div>
-        <div class="trace">
-          <div class="trace-item"><strong>source_uri</strong><small>哪个 JSONL / Parquet 文件</small></div>
-          <div class="trace-item"><strong>source_locator</strong><small>行号、字节区间或 row group / row</small></div>
-          <div class="trace-item"><strong>record_id</strong><small>规范记录与正文哈希</small></div>
-          <div class="trace-item"><strong>chunk_id</strong><small>正文字符起止位置</small></div>
-          <div class="trace-item"><strong>fact_id</strong><small>quote、数值与金融维度</small></div>
-          <div class="trace-item"><strong>graph_id / task_id</strong><small>公式版本、回放轨迹与答案</small></div>
+        <div class="sample-grid">
+          <article class="card">
+            <h3>产品 A：纯长程 query</h3>
+            <pre data-format="json">{"query":"根据云帆科技年度披露，2025年相对2024年的营业利润率绝对变动幅度是多少？请以比率小数表示并给出依据。"}</pre>
+            <p><code>queries/train.jsonl</code>、<code>queries/val.jsonl</code> 每行严格只有 query。项目外调用方可据此执行 rollout，但本项目不更新学生模型。</p>
+            <p><code>hidden-verifier.jsonl</code> 另存 query_id、split、line_index、query_sha256、snapshot_index 与完整 task，用于关联和私有验证，不能作为用户 prompt。</p>
+          </article>
+          <article class="card">
+            <h3>产品 B：规范化教师 SFT messages</h3>
+            <pre>{
+  "messages": [
+    {"role":"system","content":"工具与任务协议…","loss":false},
+    {"role":"user","content":"研究问题…","loss":false},
+    {"role":"tool_call","content":"{\"name\":\"search_corpus\",\"arguments\":{…}}","loss":true},
+    {"role":"tool_response","content":"检索结果…","loss":false},
+    {"role":"assistant","content":"教师最终证明 JSON…","loss":true}
+  ],
+  "tools": "序列化的工具定义 JSON"
+}</pre>
+            <p class="caption">这是字段结构示意，省略了中间动作；真实 content 为字符串，proof 为完整可验证 JSON。规范化动作格式不是 Strands / Codex / CC 的逐字原始会话，也不等同于任意训练框架的直接输入格式。</p>
+          </article>
         </div>
+        <div class="table-wrap" style="margin-top:18px">
+          <table>
+            <thead><tr><th>发布相对路径</th><th>内容与使用范围</th></tr></thead>
+            <tbody>
+              <tr><td>queries/train.jsonl、val.jsonl</td><td>合格且通过筛选的 long_horizon query；不要求对应教师成功</td></tr>
+              <tr><td>queries/hidden-verifier.jsonl</td><td>私有答案图、证据、快照引用和 query 关联信息</td></tr>
+              <tr><td>sft/atomic-train.jsonl、atomic-val.jsonl</td><td>context + question 与通过证明校验的 Atomic 教师输出</td></tr>
+              <tr><td>sft/long-train.jsonl、long-val.jsonl</td><td>query + 规范化工具动作 / 观察 + 最终证明，含 loss mask</td></tr>
+              <tr><td>sft/audit-sidecar.jsonl</td><td>标签、答案、证据与教师候选审核；不进入模型输入</td></tr>
+              <tr><td>sft/trajectory-index.jsonl</td><td>每次长程教师尝试的 task_id、role、attempt、runtime、model、trace、accepted、reason；运行 status 见 result.json</td></tr>
+              <tr><td>sft/traces/&lt;shard&gt;/&lt;attempt_hash&gt;/</td><td>result.json，及通常包含的 environment.json、对应 HTTP / SDK / CLI 文件；native 早期初始化失败可能只有 result.json</td></tr>
+              <tr><td>原始任务 Parquet / 可选 JSONL</td><td>task_spec、seed、source_pack、evidence_graph、answer、semantic_audit、verification 等，用于审核与再处理</td></tr>
+              <tr><td>quality_summary.json、artifact_manifest.json</td><td>数量、质量、文件大小与配置要求的 SHA-256；根目录 _PUBLISHED.json 标记发布</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>技术细节：标签、数据划分与发布顺序</summary>
+          <div>
+            <p><code>training.capabilities / financial_topics / objective_types / formula_ids / seed_ids</code> 是筛选白名单；空列表表示不限制。capabilities 用于 Atomic，objective_types / formula_ids / seed_ids 用于长程任务；financial_topics 两类共用。financial_topic 按指标关键词依序匹配 revenue、profitability、cash_flow、balance_sheet、valuation，否则 other；多主题任务也只取先匹配项，不能称为经过专家逐条标注的行业主题。</p>
+            <p>当前没有统一的 easy / medium / hard 难度字段。可报告 replay depth、事实叶数、来源数和 operation_count 等结构指标，并通过实际教师成功率与工具步数观察求解难度。</p>
+            <p>train / val 使用 task_id 的 SHA-256 前 12 个十六进制位稳定映射，默认验证集比例 5%。同一 task 的 query 与 SFT 使用一致划分，但不保证实体、来源或相似问题在两侧完全隔离；严格评估需额外分组与泄漏检查。</p>
+            <p>query_export 的阶段产物在 <code>stages/query_export/shards/000000/queries/</code>，教师失败时已导出的 query 仍可使用。最终 export 产物位于 <code>stages/export/shards/000000/</code>，汇总启用的 query 与 SFT 分支并生成发布清单。</p>
+            <p>长程尝试 trace 从各 sft_prepare shard 复制到发布的 sft/traces 目录，audit / trajectory 索引中的相对引用一并改写。原始 trace 含 prompt、来源文本与模型输出；Linux 文件权限为目录 0700 / 文件 0600，HTTP 凭据头脱敏，正文不做通用脱敏。</p>
+          </div>
+        </details>
+        <p class="source">实现：<a href="../src/mint_synth/workflow/stages/query_export.py">query_export.py</a><a href="../src/mint_synth/workflow/stages/sft_data.py">sft_data.py</a><a href="../src/mint_synth/sft/selection.py">selection.py</a><a href="../src/mint_synth/workflow/stages/publication.py">publication.py</a></p>
       </div>
     </section>
 
     <section id="quality">
       <div class="wrap">
         <div class="section-head">
-          <div><div class="eyebrow">Acceptance gates</div><h2>最后怎样决定“收下”还是“隔离”</h2></div>
-          <p>validation 同时读取 atomic 与 long-horizon 成品，再运行一次本地确定性审计。通过后才能进入 export。</p>
+          <div><div class="eyebrow">Acceptance and operating parameters</div><h2>10 · 质量门与关键合成参数</h2></div>
+          <p>“候选生成成功”与“样本可发布”是不同状态。各层拒绝原因进入统计或隔离文件；质量比率按完整上游阶段聚合判断，最终还要求最小有效量。</p>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>检查层</th><th>必须满足</th><th>失败结果</th></tr></thead>
+            <thead><tr><th>门控层</th><th>验收内容</th><th>失败行为</th></tr></thead>
             <tbody>
-              <tr><td>输入记录</td><td>text 类型/长度正确，来源可定位，输入指纹未变化</td><td class="bad">记录隔离或 shard 失败</td></tr>
-              <tr><td>事实</td><td>quote 在原文中，数值可解析，字段长度受限，字符区间有效</td><td class="bad">fact_rejected</td></tr>
-              <tr><td>证据图</td><td>无环、无断开节点、输入不重复、单位与币种兼容、答案可回放</td><td class="bad">候选图丢弃</td></tr>
-              <tr><td>语义审计</td><td>问题清楚且被证据完整支持，不泄漏答案或内部定位字段</td><td class="bad">quality_rejection</td></tr>
-              <tr><td>最终发布</td><td>全局错误率不越阈值，有效任务数达到下限，全部 shard 完成</td><td class="bad">阻止 export / 发布</td></tr>
-              <tr><td>通过</td><td>Parquet 为规范产物，可选 JSONL；清单记录文件大小与 SHA-256</td><td class="ok">写入 _PUBLISHED.json</td></tr>
+              <tr><td>输入</td><td>格式、text、记录大小、external ID 冲突、输入指纹</td><td>记录 quarantine；I/O / 指纹不一致可使 shard 失败</td></tr>
+              <tr><td>事实</td><td>quote 精确定位、显式数值 / 保真文本、字段长度、fact_type</td><td>拒绝候选 fact，记录 fact_rejected / terminal error</td></tr>
+              <tr><td>图</td><td>已有事实、类型化操作、维度兼容、无环、完整祖先、深度与来源数</td><td>候选图不输出</td></tr>
+              <tr><td>问题</td><td>语义支持与唯一性、金融有效性、不泄漏、未照抄种子、评测近重复</td><td>隔离候选 task</td></tr>
+              <tr><td>教师</td><td>实际证据取得、合法动作、预算内提交、答案与隐藏图证明匹配</td><td>拒绝 SFT 样本，保留失败轨迹</td></tr>
+              <tr><td>发布</td><td>全局比率、最低任务与样本数、完整 shard、产物清单</td><td>阻止最终发布，不写成功发布标记</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>技术细节：当前示例配置中的阈值与含义</summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>配置</th><th>值</th><th>作用</th></tr></thead>
+              <tbody>
+                <tr><td>input.max_text_chars / max_jsonl_line_bytes</td><td>20,000,000 / 67,108,864</td><td>记录级字符 / 单行字节限制；不是模型上下文</td></tr>
+                <tr><td>chunking.max_chars / overlap_chars / min_chars</td><td>6,000 / 400 / 600</td><td>切块粒度与重叠</td></tr>
+                <tr><td>extraction.max_facts_per_chunk</td><td>30</td><td>每块最多接受候选扫描数</td></tr>
+                <tr><td>atomic.tasks_per_chunk</td><td>2</td><td>Atomic 构造尝试数</td></tr>
+                <tr><td>dag.min_depth / max_depth / min_sources</td><td>2 / 4 / 2</td><td>真实操作深度与来源宽度门</td></tr>
+                <tr><td>dag.beam_width / max_candidate_groups_per_formula</td><td>32 / 4,096</td><td>每公式有效候选上限 / 扫描组合上限</td></tr>
+                <tr><td>dag.max_graphs_per_entity / max_facts_per_entity</td><td>8 / 100,000</td><td>主体级输出量 / 事实组大小限制</td></tr>
+                <tr><td>dag.min_rule_graphs_before_supplement</td><td>1</td><td>规则不足时才启用关系补充</td></tr>
+                <tr><td>query_realization.max_question_chars</td><td>1,000</td><td>问题长度门</td></tr>
+                <tr><td>training.rollouts_per_task / max_tool_steps</td><td>2 / 16</td><td>长程教师尝试数 / 金融工具预算，另预留最终提交步骤</td></tr>
+                <tr><td>training.max_context_chars / agent_runtime.timeout_seconds</td><td>24,000 / 600</td><td>环境公开上下文预算 / 外部 runtime 截止时间</td></tr>
+                <tr><td>training.atomic_samples_per_task / split_validation_fraction</td><td>2 / 0.05</td><td>每角色 Atomic proof 候选数 / 验证集比例</td></tr>
+                <tr><td>quality.max_invalid_record_ratio / max_external_id_conflict_ratio</td><td>0.001 / 0.001</td><td>输入坏记录 / 外部 ID 冲突全局阈值</td></tr>
+                <tr><td>quality.max_llm_terminal_error_ratio / max_validation_failure_ratio</td><td>0.02 / 0.01</td><td>角色终止错误 / 最终 validation 失败比率上限</td></tr>
+                <tr><td>quality.answer_tolerance / overlap_threshold</td><td>1e-6 / 0.82</td><td>数值回放容差 / 文本近重复阈值</td></tr>
+                <tr><td>quality.min_validated_tasks / query_export.min_train_queries</td><td>1 / 1</td><td>发布最低任务数 / 训练 query 数；分支启用时适用</td></tr>
+                <tr><td>training.min_atomic_samples / min_long_samples</td><td>1 / 1</td><td>相应 SFT 分支启用时的最低 train 样本数</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+        <article class="card" style="margin-top:18px">
+          <h3>汇报时建议展示的漏斗与分布</h3>
+          <p><b>输入记录 → 去重记录 → chunks → 有效 facts → 实体 → 规则图 / 补充图 → 通过语义审计的 task → validation 合格 → query → 教师尝试 → 合格 SFT。</b>这些指标不一定逐项单调：一条记录可有多块、多事实，多条任务也可能共享事实。</p>
+          <p>LLM terminal error 的分母随阶段变化：facts 按 chunks，Atomic / query_realization 按候选，实体 / 关系补充按请求数；不能把 0.02 统一描述成所有 HTTP 调用失败率。validation 的 0.01 针对进入最终复核的任务，不是要求所有合成候选的淘汰率低于 1%。</p>
+          <p>同时统计：quote / 数值抽样准确率、实体误合并与冲突、按 formula 的深度和来源分布、各门拒绝原因、teacher runtime 合格率 / 时延 / token、无日期来源比例、train / val 来源重合和评测近重复。代码已提供多项计数与审计产物；人工准确率和分组泄漏分析仍需另外组织抽样统计。</p>
+        </article>
+        <p class="source">配置：<a href="../config/mint-synth.example.yaml">mint-synth.example.yaml</a><a href="../src/mint_synth/core/config_v2.py">配置 schema / 默认值</a><a href="../src/mint_synth/workflow/worker.py">上游阶段质量门</a><a href="../src/mint_synth/workflow/stages/publication.py">全局发布门</a></p>
+      </div>
+    </section>
+
+    <section id="boundaries">
+      <div class="wrap">
+        <div class="section-head">
+          <div><div class="eyebrow">Scope and factual claims</div><h2>11 · 对外说明时需要保留的边界</h2></div>
+          <p>文档展示已实现机制，不把研究动机、测试替身或可配置上限当作已经验证的线上能力。</p>
+        </div>
+        <div class="triple">
+          <article class="card"><h3>方法实现</h3><p>采用“证据约束、先答案图后问题、双重审计、教师执行”的合成流程。公式、prompt、近似种子、证明格式属于工程实现，不能宣称逐字复现未公开的官方数据与内部 harness。</p></article>
+          <article class="card"><h3>执行兼容性</h3><p>四种 runtime 已有适配代码与本地测试；真实 Linux SDK / CLI + 所部署模型的完整联调仍需验收。尤其 Codex 与 CC 的协议不能仅凭后端提供 OpenAI Chat 接口推断兼容。</p></article>
+          <article class="card"><h3>任务与训练</h3><p>本项目产出 query、证明、SFT messages 和轨迹；Slime 的 adapter / 采集做法仅供参考，没有在这里运行 Slime、RL 优化、奖励更新或学生参数训练。</p></article>
+        </div>
+        <div class="ribbon"><b>适合汇报的一句话：</b>系统以真实语料事实为证据底座，用分析师种子约束可执行 DAG，先计算可回放答案再生成问题，经过语义与确定性审核后，按需采集强模型 agent 的真实执行过程，输出相互关联的 query、SFT 样本与审计轨迹。</div>
+      </div>
+    </section>
+
+    <section id="code-map">
+      <div class="wrap">
+        <div class="section-head"><div><div class="eyebrow">Implementation map</div><h2>12 · 技术环节到代码的映射</h2></div><p>需要回答实现细节时，可直接从下表进入对应模块。</p></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>环节</th><th>核心实现</th><th>关键产物 / 入口</th></tr></thead>
+            <tbody>
+              <tr><td>原文发现与规范化</td><td><a href="../src/mint_synth/storage/catalog.py">storage/catalog.py</a>、<a href="../src/mint_synth/workflow/stages/ingest.py">stages/ingest.py</a></td><td>输入清单、records、conflicts、quarantine</td></tr>
+              <tr><td>切块、事实与实体</td><td><a href="../src/mint_synth/workflow/stages/facts.py">stages/facts.py</a>、<a href="../src/mint_synth/synthesis/extract.py">synthesis/extract.py</a>、<a href="../src/mint_synth/synthesis/entity.py">entity.py</a></td><td>chunks、facts、resolved facts、entity partitions</td></tr>
+              <tr><td>种子与公式</td><td><a href="../src/mint_synth/synthesis/seed_constraints.py">seed_constraints.py</a>、<a href="../src/mint_synth/synthesis/dag.py">dag.py</a></td><td>seed → formula → evidence_graph / answer</td></tr>
+              <tr><td>问题与审核</td><td><a href="../src/mint_synth/workflow/stages/questions.py">stages/questions.py</a>、<a href="../src/mint_synth/synthesis/audit.py">audit.py</a>、<a href="../src/mint_synth/synthesis/replay.py">replay.py</a></td><td>tasks.parquet、validation accepted / rejected</td></tr>
+              <tr><td>冻结语料与检索</td><td><a href="../src/mint_synth/workflow/stages/indexes.py">stages/indexes.py</a>、<a href="../src/mint_synth/harness/snapshot.py">snapshot.py</a></td><td>corpus / retrieval SQLite 索引</td></tr>
+              <tr><td>环境与证明</td><td><a href="../src/mint_synth/harness/session.py">session.py</a>、<a href="../src/mint_synth/harness/verifier.py">verifier.py</a></td><td>public state、trace、evidence ledger、private verdict</td></tr>
+              <tr><td>教师与运行时</td><td><a href="../src/mint_synth/sft/rollout.py">sft/rollout.py</a>、<a href="../src/mint_synth/agents/collector.py">agents/collector.py</a>、<a href="../src/mint_synth/trace_proxy.py">trace_proxy.py</a></td><td>规范化 messages、原始 HTTP / SDK / CLI 轨迹</td></tr>
+              <tr><td>筛选与发布</td><td><a href="../src/mint_synth/sft/selection.py">sft/selection.py</a>、<a href="../src/mint_synth/workflow/stages/publication.py">stages/publication.py</a></td><td>train / val、sidecar、trajectory-index、manifest</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </section>
-
-    <section>
-      <div class="wrap">
-        <div class="sample-grid">
-          <article class="card">
-            <h3>Atomic 成品的核心结构</h3>
-            <pre>task_type: atomic
-input: {context, question}
-answer: {value/text, unit, scale, currency}
-evidence_ids: [fact_id, ...]
-evidence_graph: {nodes, terminal_id}
-reasoning_trace: [...]
-semantic_audit: {...}
-verification:
-  accepted: true
-  replay: {depth, fact_ids, source_ids, trace}</pre>
-          </article>
-          <article class="card">
-            <h3>Long-horizon 成品的核心结构</h3>
-            <pre>task_type: long_horizon
-question: "..."
-answer: {...}
-task_spec: {objective_type, fact_roles, ...}
-source_pack: [{source_id, chunk_id, source_uri}, ...]
-evidence_ids: [fact_id, ...]
-evidence_graph: {nodes, terminal_id}
-formula_id / formula_version / graph_id
-semantic_audit: {...}
-verification: {accepted: true, replay: {...}}</pre>
-          </article>
-        </div>
-      </div>
-    </section>
   </main>
-
   <footer>
-    <div class="wrap">数据合成流程示意。下一页：<a href="project-architecture.html">项目架构与运行方式</a>。</div>
+    <div class="wrap">mint-synth · v3 数据合成技术说明。<a href="project-architecture.html">工程架构</a> · <a href="methodology.md">方法说明</a> · <a href="sft-v3.md">SFT 契约</a> · <a href="opd.md">query 契约</a> · <a href="../README.md">运行说明</a>。本页离线自包含；打印时自动展开全部技术细节。</div>
   </footer>
+  <script>
+    const panels = Array.from(document.querySelectorAll("details"));
+    document.getElementById("expand-all").addEventListener("click", () => panels.forEach(panel => { panel.open = true; }));
+    document.getElementById("collapse-all").addEventListener("click", () => panels.forEach(panel => { panel.open = false; }));
+    document.getElementById("print-page").addEventListener("click", () => window.print());
+    let previousPrintState = [];
+    window.addEventListener("beforeprint", () => {
+      previousPrintState = panels.map(panel => panel.open);
+      panels.forEach(panel => { panel.open = true; });
+    });
+    window.addEventListener("afterprint", () => panels.forEach((panel, index) => { panel.open = previousPrintState[index] ?? panel.open; }));
+  </script>
 </body>
 </html>

@@ -7,12 +7,22 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
+
+from mint_synth.inference.exchange import EXCHANGE_VERSION, native_parts
 
 
 class LLMError(RuntimeError):
     pass
+
+
+class LLMExchangeError(LLMError):
+    def __init__(self, message: str, exchange: dict[str, Any]):
+        super().__init__(message)
+        self.exchange = exchange
 
 
 class LLMHTTPError(LLMError):
@@ -20,6 +30,7 @@ class LLMHTTPError(LLMError):
         super().__init__(f"HTTP {status_code} from model API: {detail[:2000]}")
         self.status_code = status_code
         self.retry_after = retry_after
+        self.detail = detail
 
 
 class JsonLLM(Protocol):
@@ -170,6 +181,15 @@ class OpenAICompatibleClient:
         max_tokens: int = 4096,
         sample_key: str | None = None,
     ) -> dict[str, Any] | list[Any]:
+        return self.complete_json_exchange(
+            system=system, user=user, temperature=temperature,
+            max_tokens=max_tokens, sample_key=sample_key,
+        )["parsed_response"]
+
+    def complete_json_exchange(
+        self, *, system: str, user: str, temperature: float = 0.0,
+        max_tokens: int = 4096, sample_key: str | None = None, native_action: bool = False,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
@@ -190,21 +210,40 @@ class OpenAICompatibleClient:
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
+        exchange: dict[str, Any] = {
+            "format_version": EXCHANGE_VERSION, "call_id": uuid.uuid4().hex,
+            "protocol": "chat_completions", "request": payload, "attempts": [],
+            "started_at": datetime.now(timezone.utc).isoformat(), "cache_hit": False,
+        }
+
         last_error: BaseException | None = None
         self._increment(requests=1)
         for attempt in range(self.config.retries + 1):
             self._increment(attempts=1)
             retry_after: float | None = None
+            attempt_record: dict[str, Any] = {"attempt": attempt + 1}
+            exchange["attempts"].append(attempt_record)
             try:
                 body = self._request_json(encoded, headers)
+                attempt_record["response"] = body
+                exchange["response"] = body
                 choices = body.get("choices") if isinstance(body, dict) else None
                 if not isinstance(choices, list) or not choices:
                     raise LLMError("chat completion response has no choices")
                 message = choices[0].get("message", {})
-                content = message.get("content")
-                if content in (None, ""):
-                    content = message.get("reasoning_content")
-                parsed = parse_json_payload(content)
+                if not isinstance(message, dict):
+                    raise LLMError("model response message is not an object")
+                if native_action:
+                    try:
+                        parsed, parts = native_parts(message)
+                    except ValueError as exc:
+                        raise LLMError(str(exc)) from exc
+                    exchange["assistant_parts"] = parts
+                else:
+                    content = message.get("content")
+                    if content in (None, ""):
+                        content = message.get("reasoning_content")
+                    parsed = parse_json_payload(content)
                 usage = body.get("usage", {}) if isinstance(body, dict) else {}
                 self._increment(
                     successful_requests=1,
@@ -212,17 +251,22 @@ class OpenAICompatibleClient:
                     completion_tokens=int(usage.get("completion_tokens", 0) or 0),
                     total_tokens=int(usage.get("total_tokens", 0) or 0),
                 )
-                return parsed
+                exchange.update(parsed_response=parsed, finished_at=datetime.now(timezone.utc).isoformat())
+                return exchange
             except LLMHTTPError as exc:
                 last_error = exc
+                attempt_record.update(error_type=type(exc).__name__, http_status=exc.status_code)
+                attempt_record["response_text"] = exc.detail
                 retry_after = exc.retry_after
                 if exc.status_code not in {408, 409, 429, 500, 502, 503, 504}:
                     break
             except (json.JSONDecodeError, LLMError) as exc:
                 last_error = exc
+                attempt_record["error_type"] = type(exc).__name__
             if attempt < self.config.retries:
                 delay = retry_after if retry_after is not None else self.config.backoff_seconds * (2**attempt) + random.random()
                 delay = min(60.0, max(0.0, delay))
                 time.sleep(delay)
         self._increment(terminal_failures=1)
-        raise LLMError(f"model request failed after retries: {last_error}") from last_error
+        exchange["finished_at"] = datetime.now(timezone.utc).isoformat()
+        raise LLMExchangeError(f"model request failed after retries: {last_error}", exchange) from last_error

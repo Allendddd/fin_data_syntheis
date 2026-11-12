@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, TypeVar
 
 from mint_synth.inference.llm import ClientConfig, JsonLLM, OpenAICompatibleClient
+from mint_synth.inference.exchange import EXCHANGE_VERSION
 
 
 T = TypeVar("T")
@@ -146,6 +147,48 @@ class ConfiguredRoleClient:
         if self.cache is not None:
             response = self.cache.put(request_key, response)
         return response
+
+    def complete_json_exchange(
+        self, *, system: str, user: str, temperature: float = 0.0,
+        max_tokens: int = 4096, sample_key: str | None = None, native_action: bool = True,
+    ) -> dict[str, Any]:
+        """Use a new cache namespace; parsed-only legacy rows are insufficient."""
+        del temperature
+        effective_max_tokens = self.max_tokens if self.max_tokens is not None else max_tokens
+        material = {
+            "namespace": self.cache_namespace, "system": system, "user": user,
+            "temperature": self.temperature, "max_tokens": effective_max_tokens,
+            "sample_key": sample_key, "exchange_version": EXCHANGE_VERSION,
+            "native_action": native_action,
+        }
+        request_key = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True,
+                                                separators=(",", ":")).encode("utf-8")).hexdigest()
+        cached = self.cache.get(request_key) if self.cache is not None else None
+        if cached is not None:
+            with self._cache_stats_lock:
+                self._cache_hits += 1
+            response = cached
+        else:
+            if self.cache is not None:
+                with self._cache_stats_lock:
+                    self._cache_misses += 1
+            complete = getattr(self.delegate, "complete_json_exchange", None)
+            if not callable(complete):
+                raise RuntimeError("teacher client does not support complete model exchange capture")
+            response = complete(system=system, user=user, temperature=self.temperature,
+                                max_tokens=effective_max_tokens, native_action=native_action,
+                                **({"sample_key": sample_key} if sample_key is not None else {}))
+            self._validate_exchange(response)
+            if self.cache is not None:
+                response = self.cache.put(request_key, response)
+        self._validate_exchange(response)
+        return {**response, "cache_key": request_key, "cache_hit": cached is not None}
+
+    @staticmethod
+    def _validate_exchange(response: Any) -> None:
+        if (not isinstance(response, dict) or response.get("format_version") != EXCHANGE_VERSION
+                or not {"request", "response", "parsed_response", "assistant_parts", "call_id"} <= response.keys()):
+            raise RuntimeError("teacher exchange is incomplete or uses the legacy parsed-only format")
 
     def stats(self) -> dict[str, int]:
         values = self.delegate.stats()

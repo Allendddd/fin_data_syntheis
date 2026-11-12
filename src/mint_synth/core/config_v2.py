@@ -81,6 +81,7 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "rollouts_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
                 "max_tool_steps": {"type": "integer", "minimum": 2, "maximum": 64, "default": 16},
                 "max_context_chars": {"type": "integer", "minimum": 2000, "default": 24000},
+                "reasoning_format": {"enum": ["plain", "think"], "default": "plain"},
                 "split_validation_fraction": {"type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05},
                 "min_atomic_samples": {"type": "integer", "minimum": 1, "default": 1},
                 "min_long_samples": {"type": "integer", "minimum": 1, "default": 1},

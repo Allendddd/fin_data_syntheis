@@ -22,6 +22,7 @@ from mint_synth.synthesis.seed_constraints import formulas_for_seed
 from mint_synth.core.config_v2 import load_config
 from mint_synth.core.run_state import RunLayout, atomic_json
 from mint_synth.sft.formatting import atomic_messages
+from mint_synth.inference.exchange import native_parts
 from mint_synth.workflow.stages.questions import stage_graph_planning
 from mint_synth.workflow.stages.sft_data import stage_sft_prepare
 from mint_synth.workflow.stages.publication import stage_export
@@ -74,6 +75,16 @@ class SequenceClient:
     def complete_json(self, **kwargs):
         self.calls.append(kwargs)
         return next(self.values)
+
+    def complete_json_exchange(self, **kwargs):
+        action = self.complete_json(**kwargs)
+        message = {"role": "assistant", "content": json.dumps(action)}
+        parsed, parts = native_parts(message)
+        return {"format_version": 2, "call_id": f"mock-{len(self.calls)}",
+                "request": {"messages": [{"role": "system", "content": kwargs["system"]},
+                                         {"role": "user", "content": kwargs["user"]}]},
+                "response": {"choices": [{"message": message}]},
+                "parsed_response": parsed, "assistant_parts": parts, "cache_hit": False}
 
 
 def snapshot(path: Path) -> None:
@@ -215,15 +226,40 @@ class TeacherProofTests(unittest.TestCase):
                 self.assertTrue(grade["answer_correct"])
                 self.assertFalse(grade["derivation_valid"])
                 self.assertFalse(grade["accepted"])
-            client = SequenceClient([*actions, {"final": json.dumps(proof())}])
+            completed_actions = [*actions, {"final": json.dumps(proof())}]
+            client = SequenceClient(completed_actions)
             config = {"training": {"max_tool_steps": 4, "max_context_chars": 24000},
                       "run": {"cutoff": "2025-12-31"}, "input": {"available_at_field": "published_at"},
                       "quality": {"answer_tolerance": "1e-6"}}
-            sample, reason = long_rollout(source, client, index, config)
+            trace_dir = Path(temp) / "trace"
+            sample, reason = long_rollout(source, client, index, config, trace_dir=trace_dir)
             self.assertEqual(reason, "accepted")
             self.assertEqual([message["loss"] for message in sample["messages"] if message["role"] == "tool_response"],
                              [False, False, False])
             self.assertTrue(sample["messages"][-1]["loss"])
+            # The SFT target uses tool calls and a bare proof, while native
+            # generation uses JSON actions. Each must keep its own protocol.
+            prompt = sample["messages"][0]["content"]
+            self.assertIn("2025-12-31", prompt)
+            self.assertIn("final assistant response", prompt)
+            self.assertNotIn('{"tool":', prompt)
+            self.assertNotIn('{"final":', prompt)
+            self.assertEqual(json.loads(sample["messages"][-1]["content"]), proof())
+            events = json.loads((trace_dir / "model.parsed.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(events), len(completed_actions))
+            tool_responses = [json.loads(message["content"]) for message in sample["messages"]
+                              if message["role"] == "tool_response"]
+            for step, (event, call, action) in enumerate(zip(events, client.calls, completed_actions)):
+                self.assertEqual(event["system"], call["system"])
+                self.assertIn('{"final":', event["system"])
+                self.assertEqual(event["user"], call["user"])
+                self.assertEqual(event["parsed_response"], action)
+                state = json.loads(event["user"])
+                self.assertEqual(state["question"], source["question"])
+                self.assertEqual(len(state["history"]), step)
+                self.assertNotIn("evidence_graph", state)
+                if step:
+                    self.assertEqual(state["history"][-1]["observation"], tool_responses[step - 1])
 
     def test_checkpoint_fork_preserves_strict_grade(self):
         with tempfile.TemporaryDirectory() as temp:

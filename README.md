@@ -13,7 +13,8 @@
 - [SFT 轨迹与输出格式](docs/sft-v3.md)
 - [代码目录](docs/code-layout.md)
 - [单脚本 SLURM 提交](slurm/README.md)
-- [合成流程示意](docs/data-synthesis-flow.html)
+- [工程架构与运行方式](docs/project-architecture.html)
+- [数据合成全流程与技术细节](docs/data-synthesis-flow.html)
 
 ## 安装
 
@@ -40,7 +41,7 @@ cp config/mint-synth.example.yaml config/production.yaml
 
 - `input.paths`、`input.text_field`、`input.metadata_fields`：语料和正文、日期、实体等元数据。`input.available_at_field` 需要列入元数据。
 - `run.cutoff`、`run.work_dir`、`output.root`：冻结截止日、工作目录和输出目录。
-- `llm.endpoints`、`llm.roles`：外部 OpenAI-compatible `/chat/completions` 服务。密钥只通过配置指定的环境变量传入。
+- `llm.endpoints`、`llm.roles`：基础合成角色使用 OpenAI-compatible Chat Completions 服务；长程教师按 runtime 使用 Chat Completions、Responses 或 Anthropic Messages，详见 [教师 runtimes](docs/teacher-runtimes.md)。密钥通过配置指定的环境变量传入。
 - `query_realization.seed_file`：可选的长程任务种子 JSONL。
 - `query_export.enabled`：导出经过验证的长程 query；`min_train_queries` 是发布门槛。
 - `training.enabled`：是否采集教师 SFT 轨迹；`training.teacher_role` 可选择单独配置的 `llm.roles.teacher`。其余 `training.*` 字段只用于数据筛选、教师 rollout 和 SFT 样本门槛，不执行模型训练。

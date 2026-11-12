@@ -82,6 +82,7 @@ training:
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000
+  reasoning_format: plain       # plain preserves exposed reasoning text; think adds one <think> wrapper
   split_validation_fraction: 0.05
   min_atomic_samples: 1
   min_long_samples: 1

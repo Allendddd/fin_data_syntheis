@@ -1,107 +1,248 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mint-synth：架构与运行方式</title>
-  <style>
-    :root { color-scheme: dark; --bg:#0b1220; --panel:#152238; --line:#34465d; --text:#edf4ff; --muted:#b2c2d6; --blue:#83b9ff; --green:#86dfbd; --gold:#f0cf85; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
-    main { max-width:1120px; margin:auto; padding:32px 20px 72px; }
-    a { color:var(--green); }
-    h1 { font-size:clamp(32px,5vw,54px); line-height:1.15; margin:18px 0; }
-    h2 { margin:48px 0 18px; font-size:26px; }
-    h3 { margin:0 0 8px; font-size:18px; }
-    p { margin:8px 0 16px; }
-    .lead,.muted { color:var(--muted); }
-    .lead { max-width:880px; font-size:19px; }
-    .links { display:flex; gap:20px; flex-wrap:wrap; margin:20px 0; }
-    .grid { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .card,.step { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
-    .card strong { color:var(--blue); }
-    .flow { display:flex; align-items:stretch; gap:10px; flex-wrap:wrap; }
-    .step { flex:1 1 180px; }
-    .arrow { align-self:center; color:var(--gold); font-size:25px; }
-    .branch { border-left:4px solid var(--green); padding-left:15px; }
-    .branch.teacher { border-color:var(--gold); }
-    code,pre { font-family:Consolas,"Cascadia Code",monospace; }
-    code { color:var(--green); overflow-wrap:anywhere; }
-    pre { padding:16px; overflow:auto; border:1px solid var(--line); border-radius:12px; background:#070d18; }
-    ul { padding-left:22px; }
-    li { margin:5px 0; }
-    @media(max-width:700px) { .grid { grid-template-columns:1fr; } .arrow { display:none; } .flow { display:grid; } }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>mint-synth｜工程架构与运行边界</title>
+<style>
+:root{color-scheme:dark;--bg:#08111f;--panel:#102036;--line:#2d435e;--text:#edf4ff;--muted:#abc0d8;--blue:#83b9ff;--cyan:#69dfd0;--gold:#f0cb80;--purple:#c6afff}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:85px}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102b49 0,transparent 40%),var(--bg);color:var(--text);font:15px/1.75 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}.wrap{width:min(1240px,calc(100% - 40px));margin:auto}.topbar{position:sticky;top:0;z-index:10;background:rgba(8,17,31,.96);border-bottom:1px solid var(--line)}.topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0}.brand{font-weight:800;white-space:nowrap}nav{display:flex;gap:10px 18px;flex-wrap:wrap}nav a{color:var(--muted);font-size:12px}
+main{padding:54px 0 70px}.eyebrow{color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.14em}h1{font-size:clamp(34px,5vw,60px);letter-spacing:-.035em;line-height:1.15;margin:10px 0 20px}h2{font-size:clamp(25px,3.5vw,34px);line-height:1.3;margin:0 0 12px}h3{font-size:18px;line-height:1.4;margin:0 0 10px}h4{font-size:15px;margin:0 0 6px}p{margin:8px 0 14px}.lead{font-size:19px;max-width:1000px;color:var(--muted)}.muted,.caption{color:var(--muted)}.caption{font-size:12px;margin-top:12px}.section{padding-top:54px}.intro{max-width:1040px;color:var(--muted);margin-bottom:22px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.three{grid-template-columns:repeat(3,minmax(0,1fr))}.four{grid-template-columns:repeat(4,minmax(0,1fr))}.card,.callout,.diagram,.table-wrap{border:1px solid var(--line);background:linear-gradient(125deg,rgba(20,41,65,.95),rgba(12,26,44,.96));border-radius:16px}.card{padding:22px;min-width:0}.card p:last-child{margin-bottom:0}.card strong{color:var(--blue)}.stats{margin-top:28px}.stats strong{display:block;font-size:25px}.stats span{color:var(--muted);font-size:12px}.callout{padding:18px 22px;margin:20px 0;border-left:4px solid var(--gold)}.callout strong{color:var(--gold)}.callout p:last-child{margin-bottom:0}.links{display:flex;flex-wrap:wrap;gap:9px 20px;margin:18px 0 0;font-size:13px}
+code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overflow-wrap:anywhere}pre{padding:18px;margin:12px 0;overflow:auto;border:1px solid var(--line);border-radius:12px;background:#060e1a;color:#d7e8ff;line-height:1.6;font-size:12px}.tag{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:30px;padding:2px 9px;margin:0 5px 6px 0;color:var(--muted)}.tag.rule{color:var(--cyan);border-color:#376d6d}.tag.optional{color:var(--gold);border-color:#7a6741}
+.diagram{padding:22px;overflow:hidden}.layer{display:grid;grid-template-columns:130px 1fr;gap:20px;padding:17px 0}.layer+.layer{border-top:1px dashed var(--line)}.layer-label{color:var(--muted);font-size:12px;padding-top:8px}.layer-label b{display:block;font-size:15px;color:var(--text)}.nodes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.node{padding:15px;border:1px solid var(--line);border-radius:11px;background:#0b1729;min-width:0}.node p{color:var(--muted);font-size:12px;margin:6px 0 0}.node h4{color:var(--blue)}.node.aux h4{color:var(--gold)}.node.runtime h4{color:var(--purple)}.node.output h4{color:var(--cyan)}.down{text-align:center;color:var(--gold);font-size:22px;padding:4px 0}.flow{display:flex;align-items:stretch;gap:10px}.flow .node{flex:1}.arrow{align-self:center;color:var(--gold);font-size:22px}
+.table-wrap{overflow:auto;margin:18px 0}table{border-collapse:collapse;width:100%;min-width:750px;text-align:left}th,td{padding:14px 16px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13px}th{background:rgba(105,223,208,.07);color:var(--cyan);font-weight:700}tr:last-child td{border-bottom:0}td:first-child{font-weight:600}.number{color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.08em;margin-bottom:8px}.footer{border-top:1px solid var(--line);margin-top:45px;padding-top:22px;color:var(--muted);font-size:12px}
+@media(max-width:900px){.three,.four{grid-template-columns:repeat(2,minmax(0,1fr))}.layer{grid-template-columns:1fr;gap:8px}.layer-label{padding:0}.nodes{grid-template-columns:1fr}.flow{flex-direction:column}.arrow{transform:rotate(90deg)}}
+@media(max-width:600px){.wrap{width:calc(100% - 28px)}.topbar{position:static}.topbar .wrap{display:block}nav{margin-top:9px}.grid,.three,.four{grid-template-columns:1fr}main{padding-top:32px}.section{padding-top:38px}.diagram,.card{padding:17px}.lead{font-size:17px}}
+@media print{:root{color-scheme:light;--bg:#fff;--line:#bdc7d2;--text:#101923;--muted:#44505d;--blue:#12529a;--cyan:#16685f;--gold:#795800;--purple:#633d9e}body{background:#fff;font-size:10pt}.wrap{width:100%}.topbar{position:static;background:#fff}.topbar nav{display:none}main{padding:20px 0}h1{font-size:30pt}h2{font-size:20pt}.section{padding-top:26px}.card,.callout,.diagram,.table-wrap,.node,th{background:#fff}.node,.card,tr{break-inside:avoid}code,pre{color:#1f344b}pre{background:#f6f8fa;white-space:pre-wrap;overflow-wrap:anywhere}.table-wrap{overflow:visible}table{min-width:0}th,td{padding:8px;font-size:9pt}a{color:#12529a}.lead{font-size:12pt}.tag{color:inherit!important}}
+</style>
 </head>
 <body>
-<main>
-  <h1>项目架构与运行方式</h1>
-  <p class="lead">v3 从原始金融语料构造可验证的长程 query。可选的教师数据阶段让强模型在本地冻结的语料快照和工具 harness 中执行 query，并输出 SFT messages。运行入口与调度器分离。</p>
-  <nav class="links">
-    <a href="../README.md">使用说明</a>
-    <a href="methodology.md">构造方法</a>
-    <a href="opd.md">query 数据契约</a>
-    <a href="sft-v3.md">SFT 轨迹</a>
-    <a href="../slurm/README.md">SLURM 提交</a>
-  </nav>
+<header class="topbar"><div class="wrap">
+<a class="brand" href="../README.md">mint-synth / 工程架构</a>
+<nav aria-label="页内目录"><a href="#overview">分层架构</a><a href="#stages">阶段依赖</a><a href="#runtimes">Agent 接入</a><a href="#tracing">轨迹采集</a><a href="#modules">代码职责</a><a href="#operations">Linux 运行</a><a href="#artifacts">发布产物</a></nav>
+</div></header>
+<main class="wrap">
+<div class="eyebrow">V3 · FINANCIAL DATA SYNTHESIS · LINUX RUNTIME</div>
+<h1>工程架构与运行边界</h1>
+<p class="lead">从原始金融语料出发，用有出处的事实构造可执行的证据 DAG，再生成并验证问题；按需让强教师模型通过统一金融环境执行问题，产出可审计的 agent 轨迹与 SFT 样本。</p>
+<div class="links"><a href="data-synthesis-flow.html">完整数据合成技术流程 →</a><a href="methodology.md">方法与实现边界</a><a href="teacher-runtimes.md">教师 runtimes 配置</a><a href="harness.md">Harness API</a><a href="../slurm/README.md">SLURM 运行</a></div>
+<div class="grid four stats">
+<div class="card"><strong>2 条交付分支</strong><span>独立 query 数据 / 可选教师 SFT 数据</span></div>
+<div class="card"><strong>4 种教师执行方式</strong><span>native / Strands / Codex / Claude Code</span></div>
+<div class="card"><strong>3 层轨迹记录</strong><span>模型协议 / Agent 框架 / 金融环境</span></div>
+<div class="card"><strong>1 份冻结计划</strong><span>本地进程与 SLURM 使用相同执行入口</span></div>
+</div>
+<div class="callout"><strong>项目定位：合成数据与校验环境。</strong><p>配置中的 <code>training.*</code> 用于任务选择、教师轨迹和 SFT 样本准备；本项目不执行学生策略训练、梯度更新或 RL 优化。Slime 提供架构参考，本项目没有 Slime 运行依赖。SDK/CLI 适配器已经实现，真实 Linux 模型服务的端到端兼容性仍需按部署版本验收。</p></div>
 
-  <h2>运行路径</h2>
-  <div class="grid">
-    <div class="card">
-      <h3>本地机器</h3>
-      <p><code>mint-synth run --config config/production.yaml --workers 1</code></p>
-      <p class="muted">创建冻结计划，依计划顺序执行阶段。在同一阶段内，<code>--workers</code> 控制分片进程数。</p>
-    </div>
-    <div class="card">
-      <h3>SLURM 集群</h3>
-      <p><code>mint-synth plan --config config/production.yaml</code><br>
-      <code>bash scripts/submit_slurm.sh &lt;run_dir&gt; [sbatch options...]</code></p>
-      <p class="muted">提交一个作业。<code>slurm/mint-synth.sbatch</code> 使用计算节点的 Python 调用同一个 <code>run --run-dir</code> 入口；资源和解释器由脚本及环境变量指定。</p>
-    </div>
-  </div>
-  <p>再次调用 <code>run --run-dir &lt;run_dir&gt;</code> 时，运行器根据计划签名与完整性检查跳过已完成分片。运行目录锁避免两个进程同时写入同一计划。</p>
+<section class="section" id="overview">
+<h2>01 / 分层架构：控制面冻结过程，数据面构造样本</h2>
+<p class="intro">业务链路由阶段处理器实现；计划器固定依赖、分片和签名，运行器负责执行缺失分片。模型部署服务负责推理，金融环境负责工具、证据与答案校验，两者各有独立记录。</p>
+<div class="diagram" aria-label="从配置和原始语料到query与SFT发布的分层架构">
+<div class="layer"><div class="layer-label"><b>控制面</b>计划 · 调度 · 恢复</div><div class="nodes">
+<div class="node"><h4>配置与辅助文件</h4><p>v3 YAML、模型角色、截止日、质量门槛、公式、实体别名、任务种子、自定义工具。</p></div>
+<div class="node"><h4>Planner → 冻结 plan.json</h4><p>扫描输入、打包 normalize 分片、检查公式/种子匹配，固定阶段依赖及上下游签名。</p></div>
+<div class="node"><h4>Runner / Worker</h4><p>当前机器或 SLURM 作业执行；阶段按计划顺序推进，同一阶段内可并行分片。</p></div>
+</div></div>
+<div class="layer"><div class="layer-label"><b>数据与知识层</b>保留出处</div><div class="nodes">
+<div class="node"><h4>JSONL / Parquet 语料</h4><p>正文与可用日期、实体等元数据；normalize、ID 冲突校验、正文去重后切块。</p></div>
+<div class="node"><h4>结构化事实池</h4><p>extractor 抽取事实，保留 source_id、chunk_id、引文；实体解析后按实体重分区。</p></div>
+<div class="node aux"><h4>公式与种子约束</h4><p>公式确定可执行运算；任务种子约束目标类型、事实角色和推理形式。事实数值来自原始语料。</p></div>
+</div></div>
+<div class="layer"><div class="layer-label"><b>合成与验证层</b>先有可解结构</div><div class="nodes">
+<div class="node"><h4>证据 DAG 规划</h4><p>从已对齐事实实例化可用公式，形成证据叶节点与计算节点，保留来源和标准答案。</p></div>
+<div class="node"><h4>Query 实现与原子分支</h4><p>constructor 将 DAG 和任务种子实现为问题；可选 atomic 从单个 chunk 及其事实构造局部能力任务。</p></div>
+<div class="node"><h4>结构、重放与语义验证</h4><p>检查证据与答案图，执行运算重放并做审计；配置启用时进行评测题去污染。</p></div>
+</div></div>
+<div class="layer"><div class="layer-label"><b>执行与教师层</b>可选生成轨迹</div><div class="nodes">
+<div class="node"><h4>冻结语料与检索索引</h4><p>从 chunks 构建 SQLite 快照，并结合实体分区事实建立检索索引，固定 cutoff 与来源。</p></div>
+<div class="node runtime"><h4>Native / Strands / Codex / CC</h4><p>保留不同的 agent loop；共享金融工具、任务限制和最终证明校验。外部 runtime 保留协议层轨迹。</p></div>
+<div class="node"><h4>HarnessSession</h4><p>维护动作、预算、证据账本和工作记忆；私有 grade 不暴露给模型，成功证明才进入 SFT。</p></div>
+</div></div>
+<div class="layer"><div class="layer-label"><b>发布层</b>按用途分离</div><div class="nodes">
+<div class="node output"><h4>Query 数据</h4><p>train/val 只有 query；隐藏校验单独保存任务、证据、答案图与快照引用。</p></div>
+<div class="node output"><h4>SFT messages</h4><p>atomic 与 long 分别输出；工具观察不计算 loss，私有审计数据保存在 sidecar。</p></div>
+<div class="node output"><h4>审计与发布清单</h4><p>保存成功/失败轨迹、质量统计、文件大小与可选 SHA-256，再写 _PUBLISHED.json。</p></div>
+</div></div>
+</div>
+<p class="caption">“证据 DAG”表示单个问题的推理与计算依赖；下节的“阶段依赖”表示工程流水线的执行顺序，二者是不同层级。</p>
+</section>
 
-  <h2>v3 数据阶段</h2>
-  <div class="flow" aria-label="主要阶段">
-    <div class="step"><h3>输入整理</h3><p>normalize → ID 校验 → 去重</p></div>
-    <div class="arrow">→</div>
-    <div class="step"><h3>证据构造</h3><p>事实抽取 → 实体解析 → 重分区</p></div>
-    <div class="arrow">→</div>
-    <div class="step"><h3>任务构造</h3><p>evidence DAG → query 实现 → 验证</p></div>
-  </div>
-  <p class="muted">可选的原子任务从事实分支生成，并汇入验证阶段。实际启用的阶段、分片数与依赖关系由计划文件固定。</p>
-  <div class="grid">
-    <div class="card branch">
-      <h3>长程 query 分支</h3>
-      <p>冻结语料索引 → 检索索引 → <code>query_export</code></p>
-      <p>输出只含 <code>query</code> 的 train/val JSONL 和独立的隐藏答案校验文件。该阶段依赖已验证任务与检索索引，可先于教师轨迹完成。</p>
-    </div>
-    <div class="card branch teacher">
-      <h3>教师 SFT 分支，可关闭</h3>
-      <p><code>sft_prepare</code> 让强模型执行 query，使用 <code>search_corpus</code>、<code>open_chunk</code> 与 <code>calculate</code>。轨迹通过证据与答案门控后转换为 <code>messages</code>。</p>
-    </div>
-  </div>
-  <p>最终 <code>export</code> 汇总启用的分支并检查质量门槛，写入发布清单。外部 OPD 流程使用纯 query；本项目不运行学生训练。</p>
+<section class="section" id="stages">
+<h2>02 / 阶段依赖与两个交付分支</h2>
+<p class="intro">下表对应 <a href="../src/mint_synth/workflow/planner.py"><code>workflow/planner.py</code></a> 的阶段计划。实际启用的阶段由配置决定；阶段名称、分片数与依赖在创建计划时固定。</p>
+<div class="table-wrap"><table><thead><tr><th>阶段</th><th>直接依赖</th><th>职责与主要中间结果</th></tr></thead><tbody>
+<tr><td><code>normalize</code></td><td>输入分片 assignments</td><td>规范化记录；按扫描结果和目标分片字节数分配输入工作。</td></tr>
+<tr><td><code>id_validation</code> → <code>dedup</code></td><td>ID 校验读 normalize；dedup 读 normalize + ID 校验</td><td>识别同一外部 ID 的内容冲突，再对规范化正文去重；两类问题分别统计。</td></tr>
+<tr><td><code>facts</code></td><td>dedup</td><td>切块、调用 extractor、校验出处，写 chunks 与结构化事实。</td></tr>
+<tr><td><code>atomic</code> <span class="tag optional">可选</span></td><td>facts</td><td>从事实构造原子候选，与长程任务在 validation 汇合。</td></tr>
+<tr><td><code>entity_resolution</code> → <code>repartition</code></td><td>facts → entity_resolution</td><td>解析规范实体与别名，按实体 ID 重分区，同一实体的多来源事实可共同规划。</td></tr>
+<tr><td><code>graph_planning</code> → <code>query_realization</code></td><td>repartition → graph_planning</td><td>先按种子约束选择公式，再结合事实生成答案图和具体 TaskSpec，回放通过后实现问题表述。</td></tr>
+<tr><td><code>validation</code></td><td>已启用的 atomic / query_realization</td><td>审核任务、证据、计算与问题一致性，保存合格任务及拒绝原因。</td></tr>
+<tr><td><code>corpus_index</code> → <code>retrieval_index</code></td><td>facts；retrieval 还依赖 repartition</td><td>全局 chunks 建快照；按实体事实建立分区检索索引。</td></tr>
+<tr><td><code>query_export</code> <span class="tag optional">可关闭</span></td><td>validation + retrieval_index</td><td>输出纯 query、隐藏 verifier 和快照清单，不依赖教师执行。</td></tr>
+<tr><td><code>sft_prepare</code> <span class="tag optional">可关闭</span></td><td>validation；启用 long 时还依赖 retrieval_index</td><td>筛选任务、执行教师、校验证明、规范化 messages，保存每次长程尝试。</td></tr>
+<tr><td><code>export</code></td><td>validation + 已启用的 query_export / sft_prepare</td><td>检查全局质量和数量门槛，汇总任务、query、SFT 和轨迹，提交发布清单。</td></tr>
+</tbody></table></div>
+<div class="grid">
+<div class="card"><span class="tag rule">QUERY</span><h3>先交付可验证的问题</h3><p><code>validation + retrieval_index → query_export</code>。模型输入为纯 query，隐藏校验与快照由外部使用者单独加载。教师合成失败时，已经完成的 query 分片仍可使用。</p><p class="muted">只生成 query：关闭 <code>training.enabled</code> 与 <code>atomic.enabled</code>，保留 <code>query_export.enabled</code>。</p></div>
+<div class="card"><span class="tag optional">TEACHER SFT</span><h3>按需交付实际执行轨迹</h3><p><code>validation + retrieval_index → sft_prepare</code>。长程教师通过工具取得证据并提交证明，校验通过后进入 long messages。原子教师使用独立生成与审核路径。</p><p class="muted">两条分支独立产出；最终 export 等待所有已启用分支完成。</p></div>
+</div>
+</section>
 
-  <h2>代码职责</h2>
-  <div class="grid">
-    <div class="card"><h3>core + storage</h3><p>配置与指纹、运行目录、输入读取和规范化。</p></div>
-    <div class="card"><h3>synthesis + inference</h3><p>事实、实体、DAG、query、审计，以及模型角色与请求缓存。</p></div>
-    <div class="card"><h3>harness + sft</h3><p>冻结语料工具、教师执行、轨迹审核和 messages 格式化。</p></div>
-    <div class="card"><h3>workflow</h3><p>计划、阶段处理器、worker、本地运行器、query 导出和发布。</p></div>
-  </div>
-  <p class="muted">SLURM 仅在仓库的一个作业脚本和一个提交脚本中出现。合成 YAML 不包含调度字段。旧 v2 配置仍保留读取能力；旧计划须使用创建它的代码版本继续执行。</p>
+<section class="section" id="runtimes">
+<h2>03 / Agent runtime 与金融环境解耦</h2>
+<p class="intro">替换的是长程教师的决策循环与上下文组织方式。事实、DAG、query 构造和私有校验继续使用项目实现。<code>training.agent_runtime.default / by_role</code> 选择 runtime，模型与密钥由 <code>llm.roles / endpoints</code> 配置。</p>
+<div class="diagram">
+<div class="grid four">
+<div class="node runtime"><h4>Native</h4><p>项目 JSON 动作循环<br>observe → 模型 → step<br>可复用角色请求缓存</p></div>
+<div class="node runtime"><h4>Strands</h4><p>SDK 原生工具调用<br>SequentialToolExecutor<br>SDK 维护消息历史</p></div>
+<div class="node runtime"><h4>Codex</h4><p>非交互 CLI agent loop<br>独立临时配置与 HOME<br>finance MCP HTTP</p></div>
+<div class="node runtime"><h4>Claude Code</h4><p>非交互 CLI agent loop<br>--bare / 显式 MCP<br>关闭内置工具与自动发现</p></div>
+</div>
+<div class="down" aria-hidden="true">↓</div>
+<div class="flow">
+<div class="node"><h4>统一金融动作</h4><p>native 直接调用 session；外部 runtime 经 FinanceToolBridge。CLI 通过 MCP，Strands 通过 SDK 工具包装。</p></div>
+<span class="arrow" aria-hidden="true">→</span>
+<div class="node"><h4>HarnessSession.step()</h4><p>search_corpus / open_chunk / calculate；更新步骤、工具预算、证据账本、工作记忆与可见观察。</p></div>
+<span class="arrow" aria-hidden="true">→</span>
+<div class="node output"><h4>最终提交与私有校验</h4><p>外部 submit_final(proof) 转为 final 动作；检查引用、计算与答案，合格后输出规范化 SFT。</p></div>
+</div></div>
+<div class="table-wrap"><table><thead><tr><th>Runtime</th><th>模型协议</th><th>接入实现</th><th>上下文与采样</th></tr></thead><tbody>
+<tr><td>native</td><td>OpenAI Chat Completions，JSON 动作</td><td><a href="../src/mint_synth/sft/rollout.py">sft/rollout.py</a></td><td>项目可见状态打包；角色 temperature/max_tokens；角色缓存按配置生效。</td></tr>
+<tr><td>strands</td><td>OpenAI Chat Completions，工具调用</td><td><a href="../src/mint_synth/agents/strands_runtime.py">agents/strands_runtime.py</a></td><td>裸 SDK Agent 与自身消息历史；角色 temperature/max_tokens；不复用 native JSON 请求缓存。</td></tr>
+<tr><td>codex</td><td>OpenAI Responses</td><td rowspan="2"><a href="../src/mint_synth/agents/cli_runtime.py">agents/cli_runtime.py</a> + <a href="../src/mint_synth/agents/mcp_server.py">mcp_server.py</a></td><td rowspan="2">各 CLI 管理自身上下文和请求参数，实际值保存在 HTTP 轨迹中；跨 runtime 采样参数不保证一致。</td></tr>
+<tr><td>claude_code</td><td>Anthropic Messages</td></tr>
+</tbody></table></div>
+<div class="grid three">
+<div class="card"><h3>同一任务环境</h3><p>每次尝试创建独立 session。外部 runtime 的金融调用进入专属拥有者线程，串行操作 SQLite 和状态；模型不能调用私有 <code>grade()</code>。</p></div>
+<div class="card"><h3>最终证明才是提交</h3><p>CLI 退出码为 0 或 SDK 自然结束不足以证明任务完成，必须在预算内提交最终证明，通过环境验收；外部 runtime 还检查模型采集是否完成。</p></div>
+<div class="card"><h3>教师选择有停止条件</h3><p>按配置轮换长程教师角色，首条合格轨迹出现后停止该任务的后续尝试。多角色配置不代表每个任务都运行全部 runtime。</p></div>
+</div>
+<p class="caption">自定义工具通过注册表扩展，定义、实现与声明资源纳入辅助指纹。接口见 <a href="harness.md">Harness 文档</a>，runtime 配置与限制见 <a href="teacher-runtimes.md">教师 runtimes 文档</a>。</p>
+</section>
 
-  <h2>运行目录</h2>
-  <pre>runs/&lt;run_id&gt;/
-  plan.json                 冻结阶段、依赖与分片签名
-  resolved_config.yaml      展开后的数据配置
-  assignments/              输入分片分配
-  stages/&lt;stage&gt;/shards/    分片产物和 _SUCCESS.json
-  logs/                     分片日志与可选 SLURM 日志
-  exports/manifest.json     最终发布清单
-  _PUBLISHED.json           发布标记</pre>
-  <p>分片在同一文件系统内先写临时目录，再原子提交。LLM 请求缓存支持失败分片恢复；输入、辅助文件和代码指纹阻止错误版本续跑。</p>
+<section class="section" id="tracing">
+<h2>04 / 三层轨迹：调用内容、框架执行、证据状态</h2>
+<p class="intro">部署后端记录收到的请求与返回内容；完整合成审计还需要框架事件和工具环境记录。三层分别保存，实际金融动作再规范化为对外 SFT messages。</p>
+<div class="flow">
+<div class="node runtime"><h4>Agent 决策</h4><p>SDK/CLI 发出模型请求，处理返回，决定下一步工具调用。</p></div><span class="arrow" aria-hidden="true">→</span>
+<div class="node"><h4>本地 TraceProxyServer</h4><p>外部 runtime 每次尝试自动启动；转发 HTTP，保留请求/响应/SSE 字节与时间。</p></div><span class="arrow" aria-hidden="true">→</span>
+<div class="node"><h4>模型部署服务</h4><p>vLLM/SGLang 或兼容网关，提供该 runtime 所需协议、工具 parser 与 chat template。</p></div>
+</div>
+<div class="grid three" style="margin-top:18px">
+<div class="card"><div class="number">L1 · MODEL</div><h3>模型协议层</h3><p>保存实际 prompt、工具定义、采样字段和服务返回的文本/工具调用/SSE。服务返回哪些 token、logprob 或 reasoning 字段，就保留哪些字段。</p><p><code>model/run.json</code><br><code>model/calls/*</code></p><p class="muted">不会从文本反推 token IDs，也不生成服务未返回的内部推理内容。</p></div>
+<div class="card"><div class="number">L2 · RUNTIME</div><h3>框架执行层</h3><p>Strands 保存 SDK 回调与消息历史；Codex/CC 保存 JSONL/stream-json 和诊断，可解释调用次序、框架状态与失败位置。</p><p><code>agent.events.jsonl</code><br><code>agent.messages.json</code><br>或 <code>stdout.jsonl / stderr.log / cli.json</code></p></div>
+<div class="card"><div class="number">L3 · ENVIRONMENT</div><h3>金融环境层</h3><p>真实动作与观察、证据账本、最终证明及私有 verdict，确认模型是否实际读到来源、计算和答案是否成立。</p><p><code>environment.json</code><br><code>result.json</code></p><p class="muted">隐藏答案与校验结论仅用于审计，不回传到模型工具观察。</p></div>
+</div>
+<div class="callout"><strong>原始记录与规范化样本承担不同用途。</strong><p>long messages 来自真实环境动作和观察，包含 <code>tool_call / tool_response</code> 与最终证明，并非 SDK/CLI 对话的逐字复制。native 保存 <code>model.parsed.json</code>：实际输入和解析后的 JSON 输出，可能来自缓存，不能视作原始 HTTP 记录。</p></div>
+<p>每次长程尝试都写轨迹引用，包括失败和超时。外部 runtime 停止后检查采集代理是否空闲，再冻结记录，避免迟到流式响应修改已发布文件。原始轨迹可能包含完整来源内容，HTTP 凭据头脱敏不等于正文通用脱敏。</p>
+</section>
+
+<section class="section" id="modules">
+<h2>05 / 代码职责与依赖方向</h2>
+<p class="intro">命令入口为 <a href="../src/mint_synth/cli.py"><code>mint_synth.cli:main</code></a>。包内实现直接导入所属子包，顶层部分旧模块只保留兼容导入路径。业务阶段由 <a href="../src/mint_synth/workflow/stages/registry.py">阶段注册表</a> 绑定，调度代码不承载合成算法。</p>
+<div class="table-wrap"><table><thead><tr><th>模块</th><th>工程职责</th><th>关键实现</th></tr></thead><tbody>
+<tr><td><code>core</code></td><td>配置、运行布局、原子提交、签名与指纹。</td><td><a href="../src/mint_synth/core/config_v2.py">config_v2.py</a> · <a href="../src/mint_synth/core/run_state.py">run_state.py</a> · <a href="../src/mint_synth/core/provenance.py">provenance.py</a></td></tr>
+<tr><td><code>storage</code></td><td>扫描输入、读取 JSONL/Parquet、规范记录、切块。</td><td><a href="../src/mint_synth/storage/catalog.py">catalog.py</a> · <a href="../src/mint_synth/storage/records.py">records.py</a> · <a href="../src/mint_synth/storage/chunking.py">chunking.py</a></td></tr>
+<tr><td><code>inference</code></td><td>模型角色、JSON 请求、重试、线程并发与持久化响应缓存。</td><td><a href="../src/mint_synth/inference/runtime.py">runtime.py</a> · <a href="../src/mint_synth/inference/llm.py">llm.py</a> · <a href="../src/mint_synth/inference/prompts.py">prompts.py</a></td></tr>
+<tr><td><code>synthesis</code></td><td>事实、实体、公式 DAG、种子约束、原子/长程题目、重放、审核与去污染。</td><td><a href="../src/mint_synth/synthesis/dag.py">dag.py</a> · <a href="../src/mint_synth/synthesis/long_horizon.py">long_horizon.py</a> · <a href="../src/mint_synth/synthesis/seed_constraints.py">seed_constraints.py</a> · <a href="../src/mint_synth/synthesis/audit.py">audit.py</a></td></tr>
+<tr><td><code>harness</code></td><td>快照、工具注册、公开 observe/step、会话账本与私有证明校验。</td><td><a href="../src/mint_synth/harness/snapshot.py">snapshot.py</a> · <a href="../src/mint_synth/harness/session.py">session.py</a> · <a href="../src/mint_synth/harness/verifier.py">verifier.py</a></td></tr>
+<tr><td><code>agents</code></td><td>runtime 参数、环境桥、MCP、Strands/CLI 适配与原始采集。</td><td><a href="../src/mint_synth/agents/collector.py">collector.py</a> · <a href="../src/mint_synth/agents/bridge.py">bridge.py</a> · <a href="../src/mint_synth/agents/mcp_server.py">mcp_server.py</a></td></tr>
+<tr><td><code>sft</code></td><td>筛选、确定性分割、原子教师、长程教师入口、messages 格式化。</td><td><a href="../src/mint_synth/sft/selection.py">selection.py</a> · <a href="../src/mint_synth/sft/rollout.py">rollout.py</a> · <a href="../src/mint_synth/sft/formatting.py">formatting.py</a></td></tr>
+<tr><td><code>workflow</code></td><td>计划、本地执行、worker、阶段处理器、query 导出和发布。</td><td><a href="../src/mint_synth/workflow/planner.py">planner.py</a> · <a href="../src/mint_synth/workflow/worker.py">worker.py</a> · <a href="../src/mint_synth/workflow/stages/publication.py">publication.py</a></td></tr>
+<tr><td>协议采集入口</td><td>自动收集器使用代理；独立命令可记录其他外部 agent 的模型请求与事件。</td><td><a href="../src/mint_synth/trace_proxy.py">trace_proxy.py</a> · <a href="../src/mint_synth/trace_runner.py">trace_runner.py</a> · <a href="agent-tracing.md">采集说明</a></td></tr>
+</tbody></table></div>
+</section>
+
+<section class="section" id="operations">
+<h2>06 / Linux 运行拓扑与资源边界</h2>
+<p class="intro">代码可在工作站编写，批量合成部署在 Linux。worker 通过 HTTP 调用模型服务，自身不要求加载模型权重；GPU 由 vLLM/SGLang 的部署管理。</p>
+<div class="grid">
+<div class="card"><h3>单机 / Linux 服务器</h3><pre>python3 -m pip install -e .
+# 使用 Strands 时安装可选依赖
+python3 -m pip install -e '.[strands]'
+mint-synth config validate --config config/production.yaml
+mint-synth run --config config/production.yaml --workers 4</pre><p class="muted">Python 3.10–3.13；CLI runtimes 需预先安装 Codex/Claude Code，固定可执行文件和版本。</p></div>
+<div class="card"><h3>SLURM：单作业调用相同运行器</h3><pre>mint-synth plan --config config/production.yaml
+export MINT_PYTHON=/shared/venv/bin/python
+export MINT_WORKERS=4
+bash scripts/submit_slurm.sh /shared/outputs/runs/&lt;run_id&gt; \
+  --partition=compute --cpus-per-task=8 --mem=32G</pre><p class="muted">唯一作业脚本 <code>slurm/mint-synth.sbatch</code> 调用 <code>run --run-dir</code>；SLURM 资源参数留在脚本和环境变量，不写入合成 YAML。</p></div>
+</div>
+<div class="grid three" style="margin-top:16px">
+<div class="card"><h3>并发分为两层</h3><p><code>--workers</code> 控制当前阶段的分片进程；角色客户端按 <code>llm.concurrency_per_worker</code> 处理并发。</p><p class="muted">CLI/SDK 还有自身请求行为，实际峰值取决于当前阶段与 runtime，不能统一用两配置值相乘推定。</p></div>
+<div class="card"><h3>本地代理与工具服务</h3><p>每次外部教师尝试启动 loopback 采集代理；CLI 再连接带随机 bearer token 的 finance MCP。容器化时三者须处于可互通的网络命名空间。</p></div>
+<div class="card"><h3>协议兼容是部署条件</h3><p>Strands 需要 Chat Completions 工具调用；Codex 需要 Responses；CC 需要 Anthropic Messages。模型服务或网关须提供对应协议，并匹配工具 parser 与模板。</p></div>
+</div>
+<div class="callout"><strong>会话配置隔离与超时处理已实现。</strong><p>CLI 使用独立临时 HOME、空工作目录与显式工具配置；Codex 禁用已知额外能力，CC 只启用 finance MCP。事件审计拒收非金融工具执行，配置限制不能代替操作系统隔离。Linux 超时终止 CLI 进程组，Strands 超时取消执行并冻结记录；自定义 Python 工具仍需自行保证有界执行时间。</p></div>
+</section>
+
+<section class="section" id="recovery">
+<h2>07 / 可恢复与可追溯：冻结、缓存、提交、发布</h2>
+<div class="grid">
+<div class="card"><div class="number">01 · FREEZE</div><h3>冻结输入与实现版本</h3><p><code>plan.json</code> 记录输入目录、配置、代码与辅助指纹；公式、种子、别名、评测题与自定义工具资源一并校验。</p><p>分片签名包含阶段、分片 ID、normalize 输入分配及上游聚合签名，计划本身有完整性指纹。</p></div>
+<div class="card"><div class="number">02 · REQUEST CACHE</div><h3>重用角色 JSON 请求</h3><p>SQLite 缓存按 run/stage/shard/model role 隔离；键包含角色命名空间、system/user、采样参数与 sample_key。immutable 保留首次写入，refresh 重新请求。</p><p>缓存服务于项目角色客户端和 native 教师；外部 SDK/CLI 的 HTTP 采集本身不提供响应缓存。</p></div>
+<div class="card"><div class="number">03 · COMMIT</div><h3>原子提交已完成分片</h3><p>worker 验证计划和上游，写临时目录后提交 <code>_SUCCESS.json</code>。失败保留记录，不完整分片可隔离重做。</p><p>同一 run 的运行锁阻止并发 runner 写入；恢复时校验签名和产物完整性，再复用完成分片。</p></div>
+<div class="card"><div class="number">04 · PUBLISH</div><h3>质量门槛之后发布</h3><p>检查无效记录率、ID 冲突率、LLM 终态错误率、验证拒绝率与最小数量，确认启用的 query/SFT 交付门槛。</p><p>文件清单核验后写 <code>exports/manifest.json</code> 和 <code>_PUBLISHED.json</code>；已提交 export 可用于恢复发布标记。</p></div>
+</div>
+<pre>mint-synth run --run-dir /shared/outputs/runs/&lt;run_id&gt; --workers 4
+mint-synth status --run-dir /shared/outputs/runs/&lt;run_id&gt;
+mint-synth validate --run-dir /shared/outputs/runs/&lt;run_id&gt;</pre>
+<p class="caption">输入、辅助文件或实现改变后应创建新计划；旧计划由对应代码与冻结输入继续执行。签名和缓存提高可追溯性，不能保证远端模型在不同版本与硬件上重新采样完全相同。</p>
+</section>
+
+<section class="section" id="artifacts">
+<h2>08 / 运行目录与发布数据契约</h2>
+<div class="grid">
+<div class="card"><h3>运行目录：可恢复的工作现场</h3><pre>outputs/runs/&lt;run_id&gt;/
+  plan.json                     阶段、分片、依赖与签名
+  resolved_config.yaml          配置与默认值
+  input_manifest.parquet        冻结输入目录
+  assignments/normalize/        输入分片分配
+  stages/&lt;stage&gt;/shards/        中间数据与 _SUCCESS.json
+  stages/&lt;stage&gt;/failures/      失败记录
+  stages/retrieval_index/.../    SQLite 环境快照
+  stages/sft_prepare/.../traces/ 教师原始记录
+  logs/                         分片日志
+  exports/manifest.json         发布入口
+  _PUBLISHED.json               发布标记与清单</pre></div>
+<div class="card"><h3>最终 export 分片：下游交付物</h3><pre>stages/export/shards/000000/
+  dataset/ 或 dataset.jsonl     已验证任务的完整审计数据
+  queries/
+    train.jsonl / val.jsonl     每行只有 {"query":"..."}
+    hidden-verifier.jsonl      隐藏任务、图与快照引用
+    manifest.json              query 与快照指纹
+  sft/
+    atomic-train/val.jsonl     原子教师 messages
+    long-train/val.jsonl       长程规范化 messages
+    audit-sidecar.jsonl        标签、答案与候选审计
+    trajectory-index.jsonl     所有长程尝试的引用
+    traces/&lt;shard&gt;/&lt;attempt&gt;/ 原始轨迹
+    manifest.json              样本数量与格式
+  quality_summary.json         全局质量统计
+  artifact_manifest.json       大小与可选 SHA-256</pre></div>
+</div>
+<div class="table-wrap"><table><thead><tr><th>使用者</th><th>读取内容</th><th>数据边界</th></tr></thead><tbody>
+<tr><td>下游问题执行框架</td><td><code>queries/train.jsonl</code> / <code>val.jsonl</code></td><td>模型仅接收 query；隐藏任务、答案图与 verdict 不进入模型输入。</td></tr>
+<tr><td>环境服务 / 校验器</td><td>query manifest、hidden-verifier、对应 retrieval snapshot</td><td>快照仍在 run 内 retrieval_index；复制 query 时须保留引用快照与相对目录关系，或使用约定的环境加载方式。</td></tr>
+<tr><td>SFT 数据消费方</td><td><code>atomic-*.jsonl</code> / <code>long-*.jsonl</code></td><td>使用 messages/tools/loss；不拼接私有 sidecar 或原始轨迹作为模型输入。</td></tr>
+<tr><td>开发、审核与质量分析</td><td>原始任务、sidecar、trajectory-index 和 traces</td><td>轨迹含完整 prompt、模型输出与来源。Linux 采集轨迹使用目录 0700 / 文件 0600，按数据权限管理。</td></tr>
+</tbody></table></div>
+<p class="caption">query_export 先独立保存 query 分片，export 再复制到汇总目录。SFT 轨迹引用在汇总时重写为发布后路径，成功、拒绝与超时均可追查。</p>
+</section>
+
+<section class="section" id="status">
+<h2>09 / 汇报时应说明的验证状态</h2>
+<div class="grid">
+<div class="card"><span class="tag rule">代码已实现 / 本地测试覆盖</span><h3>合成、校验与采集链路</h3><p>已实现冻结计划、事实和任务构造、query 导出、统一 session、四种教师入口、HTTP 采集、SDK/CLI 事件、超时处理与发布引用。</p><p>测试涵盖计算/证据校验和本地 HTTP/MCP；Strands 使用 SDK 替身，CLI 使用假 CLI 子进程。</p></div>
+<div class="card"><span class="tag optional">待目标环境验收</span><h3>实际模型与版本组合</h3><p>尚未在目标 Linux GPU 服务完成真实 Strands、Codex、Claude Code 的端到端执行。应固定 SDK/CLI 和服务版本，验证协议、工具、最终证明与轨迹落盘。</p><p>模拟测试不代表所有模型服务组合均已验证，也没有证据证明更换 agent loop 自动提高合成质量。</p></div>
+</div>
+<div class="links"><a href="data-synthesis-flow.html">接下来：原始数据、DAG 与种子如何共同合成一条数据 →</a><a href="sft-v3.md">SFT 数据与标签筛选</a><a href="opd.md">query 与外部环境契约</a><a href="code-layout.md">代码布局说明</a></div>
+</section>
+<footer class="footer">依据当前仓库 v3 实现编写。工程架构描述模块、运行边界与交付物；逐步算法、种子匹配规则和完整示例见“数据合成技术流程”。此页无外部脚本与字体依赖，可离线查看，支持浏览器打印。</footer>
 </main>
 </body>
 </html>

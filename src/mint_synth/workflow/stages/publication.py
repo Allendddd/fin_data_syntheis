@@ -167,7 +167,11 @@ def stage_export(
             available = sft_counts[f"{family}_train"]
             if config["training"][enabled_key] and available < required:
                 raise RuntimeError(f"SFT publication blocked: {family} has {available} accepted training samples; requires {required}")
-        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts), "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl", "trajectory_index": "trajectory-index.jsonl"})
+        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts),
+                    "trajectory_format": "teacher_interactions_v2",
+                    "reasoning_format": config["training"].get("reasoning_format", "plain"),
+                    "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl",
+                    "trajectory_index": "trajectory-index.jsonl"})
     query_counts: dict[str, int] = {}
     if config.get("version") == 3 and config["query_export"]["enabled"]:
         query_source = layout.shard("query_export", 0) / "queries"

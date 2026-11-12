@@ -89,6 +89,8 @@ def stage_sft_prepare(
                     )
                     candidate.update(accepted=sample is not None, reason=reason)
                     if sample is not None:
+                        candidate["trajectory_id"] = sample["trajectory_id"]
+                    if sample is not None:
                         teacher_audit["selected"] = {"source": "teacher", "role": role,
                                                      "runtime": runtime.name,
                                                      "attempt": attempt + 1}
@@ -122,6 +124,7 @@ def stage_sft_prepare(
                 streams[family].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                 sidecar = {
                     "task_id": task_id, "task_type": task["task_type"], "split": split,
+                    "trajectory_id": sample.get("trajectory_id"),
                     "capability": task.get("capability"), "financial_topic": financial_topic(task),
                     "objective_type": task.get("task_spec", {}).get("objective_type"),
                     "formula_id": task.get("formula_id"), "seed_id": task.get("seed", {}).get("seed_id"),

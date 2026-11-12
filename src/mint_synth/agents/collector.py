@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import threading
 from dataclasses import replace
@@ -17,27 +16,8 @@ from mint_synth.trace_proxy import TraceProxyConfig, TraceProxyServer
 
 from .base import ModelSettings, RuntimeResult, RuntimeSettings
 from .bridge import FinanceToolBridge
-
-
-def normalized_sample(snapshot: Mapping[str, Any], query: str) -> dict[str, Any]:
-    """Canonical SFT actions; exact SDK/API messages live in the raw artifacts."""
-    verdict = snapshot["audit"]["verdict"]
-    flags = iter(verdict["step_relevance"])
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": snapshot["system_prompt"], "loss": False},
-        {"role": "user", "content": query, "loss": False},
-    ]
-    for entry in snapshot["trace"]:
-        action = entry["action"]
-        if "final" in action:
-            messages.append({"role": "assistant", "content": action["final"].strip(), "loss": True})
-        else:
-            messages.extend([
-                {"role": "tool_call", "content": json.dumps({"name": entry["tool"], "arguments": entry["arguments"]}, ensure_ascii=False, separators=(",", ":")),
-                 "loss": next(flags),},
-                {"role": "tool_response", "content": json.dumps(entry["observation"], ensure_ascii=False, separators=(",", ":")), "loss": False},
-            ])
-    return {"messages": messages, "tools": json.dumps(snapshot["tools"], ensure_ascii=False, separators=(",", ":"))}
+from .trajectory import normalized_sample
+from .model_trace import load_model_turns
 
 
 def collect_runtime(
@@ -52,6 +32,7 @@ def collect_runtime(
     snapshot: dict[str, Any] = {}
     reason = "runtime did not start"
     accepted = False
+    sample = None
     try:
         case = case_from_task(task, index_path, cutoff=str(config["run"]["cutoff"]),
                               available_at_field=str(config["input"]["available_at_field"]))
@@ -86,9 +67,14 @@ def collect_runtime(
                 thread.join(timeout=5)
             snapshot = bridge.snapshot()
         verdict = snapshot.get("audit", {}).get("verdict", {})
-        accepted = result.status == "completed" and bool(verdict.get("accepted"))
+        if result.status == "completed" and bool(verdict.get("accepted")):
+            turns = load_model_turns(trace_dir, {item["function"]["name"] for item in snapshot["tools"]})
+            sample = normalized_sample(snapshot, case.query, cutoff=case.cutoff, model_turns=turns,
+                                       reasoning_format=config["training"].get("reasoning_format", "plain"),
+                                       trace_dir=trace_dir)
+            accepted = True
         reason = "accepted" if accepted else result.error or verdict.get("reason") or "agent ended without submit_final"
-        return (normalized_sample(snapshot, case.query) if accepted else None), reason
+        return sample, reason
     except Exception as exc:
         # Keep details in the private artifact; credentials are never part of the
         # model settings saved here, nor included in a rejected dataset row.
@@ -101,8 +87,10 @@ def collect_runtime(
     finally:
         atomic_json(trace_dir / "environment.json", snapshot)
         atomic_json(trace_dir / "result.json", {
-            "format_version": 1, "run_id": run_id, "task_id": task["task_id"], "runtime": runtime.name,
+            "format_version": 2, "run_id": run_id, "task_id": task["task_id"], "runtime": runtime.name,
             "model": model.model, "status": result.status, "accepted": accepted, "reason": reason,
             "runtime_metadata": result.metadata, "model_calls": "model/calls",
-            "sample_format": "normalized_financial_actions",
+            "sample_format": "teacher_interactions_v2", "capture": "complete_model_exchanges_v2",
+            "trajectory_id": sample["trajectory_id"] if sample else None,
+            "trajectory": "trajectory.json" if sample else None,
         })

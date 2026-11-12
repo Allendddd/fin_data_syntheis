@@ -36,8 +36,25 @@ def solve(bridge):
 
 class Upstream(BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers["Content-Length"]))
-        body = b'{"output":[]}'
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        name, arguments = request["mock_tool"], request["mock_arguments"]
+        text = "Mock teacher plan for " + name
+        if self.path.endswith("/chat/completions"):
+            response = {"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "reasoning_content": text, "content": "Checking the source next.",
+                "tool_calls": [{"id": "mock-call", "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(arguments)}}]}}]}
+        elif self.path.endswith("/responses"):
+            response = {"status": "completed", "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]},
+                {"type": "message", "content": [{"type": "output_text", "text": "Checking the source next."}]},
+                {"type": "function_call", "name": name, "arguments": json.dumps(arguments)}]}
+        else:
+            response = {"stop_reason": "tool_use", "content": [
+                {"type": "thinking", "thinking": text, "signature": "mock"},
+                {"type": "text", "text": "Checking the source next."},
+                {"type": "tool_use", "id": "mock-call", "name": name, "input": arguments}]}
+        body = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -73,12 +90,18 @@ class AgentCollectionTests(unittest.TestCase):
                 snapshot(index)
                 model = ModelSettings("local", f"http://127.0.0.1:{server.server_port}/v1", "secret-key")
 
-                def runtime(bridge, traced_model, _settings, root):
+                def runtime(bridge, traced_model, settings, root):
+                    endpoint = {"strands": "/chat/completions", "codex": "/responses", "claude_code": "/messages"}[settings.name]
                     with httpx.Client(trust_env=False) as client:
-                        response = client.post(traced_model.base_url + "/responses", json={"input": "query"},
-                                               headers={"Authorization": "Bearer secret-key"})
-                    self.assertEqual(response.status_code, 200)
-                    solve(bridge)
+                        for name, arguments in [("search_corpus", {"query": "Revenue"}),
+                                                ("open_chunk", {"chunk_id": "c1"}),
+                                                ("open_chunk", {"chunk_id": "c2"}),
+                                                ("submit_final", {"proof": proof()})]:
+                            response = client.post(traced_model.base_url + endpoint,
+                                json={"mock_tool": name, "mock_arguments": arguments},
+                                headers={"Authorization": "Bearer secret-key"})
+                            self.assertEqual(response.status_code, 200)
+                            bridge.call_tool(name, arguments)
                     (root / "events.jsonl").write_text('{"event":"completed"}\n')
                     return RuntimeResult("completed", metadata={"events_file": "events.jsonl"})
 
@@ -90,15 +113,21 @@ class AgentCollectionTests(unittest.TestCase):
                                                       runtime=RuntimeSettings(name), trace_dir=root)
                     self.assertEqual(reason, "accepted")
                     self.assertEqual(json.loads(sample["messages"][-1]["content"]), proof())
+                    self.assertNotIn('{"final":', sample["messages"][0]["content"])
+                    self.assertNotIn("submit_final", sample["messages"][0]["content"])
                     self.assertTrue(all(not row["loss"] for row in sample["messages"] if row["role"] == "tool_response"))
                     self.assertNotIn("evidence_graph", json.dumps(sample))
+                    self.assertIn("Mock teacher plan for search_corpus", json.dumps(sample))
+                    self.assertIn("Checking the source next.", json.dumps(sample))
                     metadata = json.loads((root / "result.json").read_text())
                     self.assertEqual(metadata["runtime"], name)
                     calls = list((root / "model" / "calls").glob("*.json"))
-                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(len(calls), 4)
                     self.assertNotIn("secret-key", calls[0].read_text())
                     call = json.loads(calls[0].read_text())
-                    self.assertEqual(json.loads((calls[0].parent / call["request"]["body_file"]).read_bytes()), {"input": "query"})
+                    self.assertIn("mock_tool", json.loads((calls[0].parent / call["request"]["body_file"]).read_bytes()))
+                    provenance = json.loads((root / "trajectory.json").read_text())
+                    self.assertEqual(provenance["trajectory_id"], sample["trajectory_id"])
         finally:
             server.shutdown()
             server.server_close()
@@ -156,7 +185,7 @@ class AgentCollectionTests(unittest.TestCase):
                 return {"messages": [{"role": "system", "content": "system"},
                                      {"role": "user", "content": task()["question"]},
                                      {"role": "assistant", "content": json.dumps(proof()), "loss": True}],
-                        "tools": "[]"}, "accepted"
+                        "tools": "[]", "trajectory_id": "mock-published-trajectory"}, "accepted"
 
             with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter([task()])),
                   patch("mint_synth.workflow.stages.sft_data._role_client") as json_client,
@@ -175,6 +204,7 @@ class AgentCollectionTests(unittest.TestCase):
             self.assertEqual(row["trace"], sidecar["teacher_audit"]["candidates"][0]["trace"])
             self.assertTrue((root / row["trace"] / "result.json").is_file())
             self.assertEqual(row["runtime"], "codex")
+            self.assertEqual(row["trajectory_id"], "mock-published-trajectory")
             sample = json.loads((root / "long-train.jsonl").read_text())
             self.assertNotIn("teacher_audit", sample)
             self.assertNotIn("evidence_graph", sample)
