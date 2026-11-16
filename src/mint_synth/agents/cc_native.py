@@ -15,7 +15,7 @@ from .model_trace import _sse_events, iter_captured_calls
 from .trajectory import TrajectoryError
 
 
-SAMPLE_FORMAT = "claude_code_native_v1"
+SAMPLE_FORMAT = "claude_code_native_v2"
 
 
 def anthropic_response(text: str, *, streaming: bool) -> dict[str, Any]:
@@ -106,16 +106,24 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
             response = anthropic_response(call["response_text"], streaming=call["streaming"])
             content = response["content"]
             block_loss = []
+            flags = snapshot.get("action_relevance", {})
+            uses = [block for block in content if block.get("type") == "tool_use"]
+            if any(block.get("id") not in flags for block in uses):
+                raise TrajectoryError("CC native export has no action relevance decision")
+            text_loss = all(flags.get(block.get("id"), {}).get("relevant", True) for block in uses)
             for block in content:
                 if not isinstance(block, dict) or not isinstance(block.get("type"), str):
                     raise TrajectoryError("CC native response contains an invalid block")
                 loss = block["type"] not in {"redacted_thinking", "tool_result"} and not block["type"].endswith("_tool_result")
+                loss = loss and text_loss
                 if block["type"] == "tool_use":
                     name, arguments = block.get("name"), block.get("input")
-                    if name not in names or not isinstance(arguments, dict) or not isinstance(block.get("id"), str):
+                    if ((name not in names and block.get("id") not in snapshot.get("failed_tool_ids", []))
+                            or not isinstance(arguments, dict) or not isinstance(block.get("id"), str)):
                         raise TrajectoryError("CC native tool call is absent from its request tools or has invalid input/ID")
                     if name.startswith("mcp__"):
                         raise TrajectoryError("CC native capture contains an MCP tool call")
+                    loss = flags.get(block["id"], {}).get("relevant", True)
                 block_loss.append(loss)
             if call["call_id"] == snapshot["final_call_id"]:
                 if response.get("id") != snapshot["final_message_id"] or response.get("stop_reason") != "end_turn":
@@ -124,7 +132,7 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
             sample = copy.deepcopy(request)
             sample["messages"] = [*sample["messages"], {"role": "assistant", "content": copy.deepcopy(content)}]
             sample.update(sample_format=SAMPLE_FORMAT, trajectory_id=trajectory_id, call_id=call["call_id"],
-                          target_message_index=len(context), loss_mask=[False] * len(context) + [True],
+                          target_message_index=len(context), loss_mask=[False] * len(context) + [any(block_loss)],
                           target_block_loss_mask=block_loss,
                           response_metadata={key: value for key, value in response.items() if key not in {"content", "role"}})
             stream.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -133,6 +141,8 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
                                "target_message_index": len(context),
                                "read_bindings": [item for item in snapshot.get("read_bindings", [])
                                                  if item["call_id"] == call["call_id"]]})
+            if final_seen:
+                break
         stream.flush()
         os.fsync(stream.fileno())
     if not source_map or not final_seen:

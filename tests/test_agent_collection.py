@@ -159,7 +159,7 @@ class AgentCollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "unknown LLM role"):
             validate_cross_fields(configured)
 
-    def test_external_role_skips_json_client_and_publication_keeps_trace_references(self):
+    def test_external_role_uses_private_auditor_and_publication_keeps_trace_references(self):
         with tempfile.TemporaryDirectory() as temp:
             layout = RunLayout(Path(temp) / "run")
             prepared = layout.shard("sft_prepare", 0)
@@ -188,10 +188,11 @@ class AgentCollectionTests(unittest.TestCase):
                         "tools": "[]", "trajectory_id": "mock-published-trajectory"}, "accepted"
 
             with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter([task()])),
-                  patch("mint_synth.workflow.stages.sft_data._role_client") as json_client,
+                  patch("mint_synth.workflow.stages.sft_data._role_client", return_value=__import__("test_natural_sft").Reviewer()) as json_client,
                   patch("mint_synth.workflow.stages.sft_data.long_rollout", side_effect=collect)):
                 metrics = stage_sft_prepare(layout, configured, {}, 0, prepared)
-            json_client.assert_not_called()
+            self.assertEqual(json_client.call_count, 1)
+            self.assertEqual(json_client.call_args.args[-1], "auditor")
             atomic_json(prepared / "_SUCCESS.json", {"metrics": metrics})
             output = Path(temp) / "export"
             output.mkdir()

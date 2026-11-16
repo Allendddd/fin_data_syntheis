@@ -100,79 +100,6 @@ def snapshot(path: Path) -> None:
 
 
 class TeacherProofTests(unittest.TestCase):
-    def test_atomic_rejects_wrong_candidates_and_keeps_prompt_private(self):
-        source = task()
-        source["task_type"] = "atomic"
-        bad = proof()
-        bad["answer"]["value"] = "999"
-        shorter = proof()
-        clients = {"weak": SequenceClient([bad]), "strong": SequenceClient([shorter])}
-        sample, audit, reason = sample_atomic(source, clients, attempts=1, policy="concise",
-                                              fallback=False, tolerance="1e-6")
-        self.assertEqual(reason, "accepted")
-        self.assertEqual(audit["selected"]["role"], "strong")
-        self.assertEqual(len(audit["candidates"]), 2)
-        self.assertFalse(audit["candidates"][0]["accepted"])
-        self.assertEqual(json.loads(sample["messages"][2]["content"]), shorter)
-        for client in clients.values():
-            call = client.calls[0]
-            self.assertNotIn("fact_id", call["user"])
-            self.assertNotIn("answer", call["user"])
-            self.assertNotIn("evidence_graph", call["user"])
-
-    def test_atomic_all_fail_and_explicit_audit_fallback(self):
-        source = task()
-        source["task_type"] = "atomic"
-        bad = proof()
-        bad["steps"] = []
-        rejected, audit, _ = sample_atomic(source, {"teacher": SequenceClient([bad])}, attempts=1,
-                                           policy="first_valid", fallback=False, tolerance="1e-6")
-        self.assertIsNone(rejected)
-        self.assertIsNone(audit["selected"])
-        fallback, audit, _ = sample_atomic(source, {"teacher": SequenceClient([bad])}, attempts=1,
-                                           policy="first_valid", fallback=True, tolerance="1e-6")
-        self.assertIsNotNone(fallback)
-        self.assertEqual(audit["selected"]["source"], "audit_fallback")
-        restated = copy.deepcopy(proof())
-        restated["question_repeated"] = source["question"] * 20
-        rejected, _, _ = sample_atomic(source, {"teacher": SequenceClient([restated])}, attempts=1,
-                                       policy="concise", fallback=False, tolerance="1e-6")
-        self.assertIsNone(rejected)
-        repeated = copy.deepcopy(proof())
-        repeated["steps"].append(copy.deepcopy(repeated["steps"][0]))
-        rejected, _, _ = sample_atomic(source, {"teacher": SequenceClient([repeated])}, attempts=1,
-                                       policy="concise", fallback=False, tolerance="1e-6")
-        self.assertIsNone(rejected)
-
-    def test_atomic_selection_policy_records_why_a_valid_candidate_won(self):
-        source = task()
-        source["task_type"] = "atomic"
-        verbose = proof()
-        verbose["facts"][0]["id"] = "longer_local_reference"
-        verbose["steps"][0]["inputs"][0] = "longer_local_reference"
-        concise = proof()
-        clients = {"first": SequenceClient([verbose]), "second": SequenceClient([concise])}
-        _, audit, _ = sample_atomic(source, clients, attempts=1, policy="concise",
-                                    fallback=False, tolerance="1e-6")
-        self.assertEqual(audit["selected"]["role"], "second")
-        self.assertLess(audit["selected"]["serialized_chars"], audit["candidates"][0]["serialized_chars"])
-        clients = {"first": SequenceClient([verbose]), "second": SequenceClient([concise])}
-        _, audit, _ = sample_atomic(source, clients, attempts=1, policy="first_valid",
-                                    fallback=False, tolerance="1e-6")
-        self.assertEqual(audit["selected"]["role"], "first")
-
-    def test_atomic_samples_use_distinct_slots_without_changing_teacher_input(self):
-        source = task()
-        source["task_type"] = "atomic"
-        client = SequenceClient([proof(), proof()])
-        sample, audit, _ = sample_atomic(source, {"teacher": client}, attempts=2,
-                                         policy="first_valid", fallback=False, tolerance="1e-6")
-        self.assertIsNotNone(sample)
-        self.assertEqual(len(audit["candidates"]), 2)
-        self.assertEqual([call["sample_key"] for call in client.calls],
-                         ["atomic:long_1:teacher:1", "atomic:long_1:teacher:2"])
-        self.assertEqual(client.calls[0]["user"], client.calls[1]["user"])
-
     def test_numeric_units_and_boolean_boundaries(self):
         source = task()
         proposed = proof()
@@ -241,7 +168,7 @@ class TeacherProofTests(unittest.TestCase):
             # generation uses JSON actions. Each must keep its own protocol.
             prompt = sample["messages"][0]["content"]
             self.assertIn("2025-12-31", prompt)
-            self.assertIn("final assistant response", prompt)
+            self.assertIn("final answer in natural language", prompt)
             self.assertNotIn('{"tool":', prompt)
             self.assertNotIn('{"final":', prompt)
             self.assertEqual(json.loads(sample["messages"][-1]["content"]), proof())
@@ -384,65 +311,6 @@ class TeacherProofTests(unittest.TestCase):
             metrics = stage_graph_planning(Layout(), config, {}, 0, Path("unused"))
         self.assertEqual(calls, [("f",)])
         self.assertEqual(metrics["planner_cache_hits"], 1)
-
-    def test_sft_prepare_keeps_private_fields_in_sidecar(self):
-        source = task()
-        source["task_type"] = "atomic"
-        client = SequenceClient([proof()])
-
-        class Layout:
-            def shard(self, *_args):
-                return Path("unused")
-
-        config = {"reader": {"batch_rows": 16}, "training": {
-            "enabled": True, "atomic_enabled": True, "long_enabled": False,
-            "atomic_teacher_roles": ["teacher"], "atomic_samples_per_task": 1,
-            "atomic_selection_policy": "concise", "atomic_audit_fallback": False,
-            "split_validation_fraction": 0,
-        }, "quality": {"answer_tolerance": "1e-6"}}
-        with tempfile.TemporaryDirectory() as temp:
-            with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter([source])),
-                  patch("mint_synth.workflow.stages.sft_data._role_client", return_value=client)):
-                stage_sft_prepare(Layout(), config, {}, 0, Path(temp))
-            sample = json.loads((Path(temp) / "atomic.jsonl").read_text(encoding="utf-8"))
-            sidecar = json.loads((Path(temp) / "sidecar.jsonl").read_text(encoding="utf-8"))
-            self.assertEqual([entry["role"] for entry in sample["messages"]], ["system", "user", "assistant"])
-            self.assertNotIn("evidence_graph", sample["messages"][1]["content"])
-            self.assertNotIn("f1", sample["messages"][1]["content"])
-            self.assertFalse(sample["messages"][1]["loss"])
-            self.assertEqual(sidecar["answer"]["value"], "160")
-            self.assertIn("evidence_graph", sidecar)
-            self.assertEqual(sidecar["teacher_audit"]["selected"]["source"], "teacher")
-
-    def test_sft_prepare_bounds_parallel_teacher_calls_and_preserves_order(self):
-        first = task()
-        first["task_type"] = "atomic"
-        second = copy.deepcopy(first)
-        second["task_id"] = "long_2"
-        barrier = threading.Barrier(2)
-
-        class ParallelTeacher:
-            def complete_json(self, **_kwargs):
-                barrier.wait(timeout=3)
-                return proof()
-
-        class Layout:
-            def shard(self, *_args):
-                return Path("unused")
-
-        config = {"reader": {"batch_rows": 16}, "llm": {"concurrency_per_worker": 2},
-                  "training": {"enabled": True, "atomic_enabled": True, "long_enabled": False,
-                               "atomic_teacher_roles": ["teacher"], "atomic_samples_per_task": 1,
-                               "atomic_selection_policy": "concise", "atomic_audit_fallback": False,
-                               "split_validation_fraction": 0},
-                  "quality": {"answer_tolerance": "1e-6"}}
-        with tempfile.TemporaryDirectory() as temp:
-            with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter([first, second])),
-                  patch("mint_synth.workflow.stages.sft_data._role_client", return_value=ParallelTeacher())):
-                counts = stage_sft_prepare(Layout(), config, {}, 0, Path(temp))
-            self.assertEqual(counts["atomic_accepted"], 2)
-            sidecars = [json.loads(line) for line in (Path(temp) / "sidecar.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([row["task_id"] for row in sidecars], ["long_1", "long_2"])
 
     def test_legacy_v3_config_receives_new_defaults(self):
         example = yaml.safe_load(Path("config/mint-synth.example.yaml").read_text(encoding="utf-8"))

@@ -14,7 +14,7 @@ from mint_synth.agents.base import settings_for_role
 from mint_synth.agents.native_capture import NATIVE_FORMATS
 from mint_synth.harness.registry import load_tool_registry
 from mint_synth.inference.runtime import bounded_map
-from mint_synth.sft.atomic_teacher import sample_atomic
+from mint_synth.sft.atomic_teacher import sample_atomic, sample_reference
 from mint_synth.sft.rollout import long_rollout
 from mint_synth.sft.selection import financial_topic, selected, split_for_task
 from mint_synth.storage.parquetio import iter_payloads
@@ -34,9 +34,14 @@ def stage_sft_prepare(
     task_path = layout.shard("validation", shard_id) / "tasks.parquet"
     training = config["training"]
     atomic_roles = training.get("atomic_teacher_roles", ["constructor"]) if training["atomic_enabled"] else []
+    atomic_verifier = training.get("atomic_verifier_role", "auditor")
+    atomic_judge = training.get("atomic_judge_role", "auditor")
     long_roles = (training.get("long_teacher_roles") or [training["teacher_role"]]) if training["long_enabled"] else []
+    long_verifier = training.get("long_verifier_role", "auditor")
     agent_settings = {role: settings_for_role(config, role) for role in long_roles}
-    json_roles = [*atomic_roles, *(role for role in long_roles if agent_settings[role][1].name == "native")]
+    json_roles = [*atomic_roles, *([atomic_verifier, atomic_judge] if atomic_roles else []),
+                  *([long_verifier] if long_roles else []),
+                  *(role for role in long_roles if agent_settings[role][1].name == "native")]
     clients = {role: _role_client(layout, config, "sft_prepare", shard_id, role) for role in dict.fromkeys(json_roles)}
     needs_finance = any(not settings.native_tools for _model, settings in agent_settings.values())
     registry = load_tool_registry(config.get("harness", {}).get("tool_registry")) if needs_finance else None
@@ -68,10 +73,28 @@ def stage_sft_prepare(
                 sample, teacher_audit, reason = sample_atomic(
                     task, {role: clients[role] for role in atomic_roles},
                     attempts=int(training.get("atomic_samples_per_task", 2)),
-                    policy=str(training.get("atomic_selection_policy", "concise")),
+                    policy=str(training.get("atomic_selection_policy", "judge")),
                     fallback=bool(training.get("atomic_audit_fallback", False)),
                     tolerance=str(config["quality"]["answer_tolerance"]),
+                    verifier=clients[atomic_verifier], judge=clients[atomic_judge],
+                    reasoning_format=training.get("reasoning_format", "plain"),
                 )
+                reference = None
+                reference_record = {"source": "audited_reference", "accepted": False, "reason": "reference disabled"}
+                fraction = int(hashlib.sha256(("reference:" + task_id).encode()).hexdigest()[:16], 16) / 2**64
+                if training.get("atomic_include_reference", True) and fraction < float(training.get("atomic_reference_fraction", 1)):
+                    reference, reference_record = sample_reference(
+                        task, clients[atomic_verifier], tolerance=str(config["quality"]["answer_tolerance"]))
+                elif training.get("atomic_include_reference", True):
+                    reference_record["reason"] = "reference excluded by configured fraction"
+                teacher_audit["reference"] = reference_record
+                if sample is None and reference is not None:
+                    sample = reference
+                    teacher_audit["exported_source"] = "audited_reference"
+                elif sample is not None:
+                    teacher_audit["exported_source"] = (teacher_audit.get("selected") or {}).get("source", "teacher")
+                    if reference is not None and teacher_audit["exported_source"] == "teacher":
+                        sample["_reference_sample"] = reference
             else:
                 sample = None
                 reason = "no rollout accepted"
@@ -91,6 +114,7 @@ def stage_sft_prepare(
                     sample, reason = long_rollout(
                         task, clients.get(role), index_path, config, registry, sample_key=sample_key,
                         model=model, runtime=runtime, trace_dir=output / trace_ref,
+                        verifier=clients[long_verifier],
                     )
                     candidate.update(accepted=sample is not None, reason=reason)
                     if sample is not None:
@@ -112,7 +136,7 @@ def stage_sft_prepare(
         ):
             task_id = str(task["task_id"])
             if family == "atomic":
-                counts["atomic_candidates"] += len(teacher_audit["candidates"])
+                counts["atomic_candidates"] += sum(row.get("source") == "teacher" for row in teacher_audit["candidates"])
             else:
                 counts["rollouts"] += len(teacher_audit["candidates"])
                 for candidate in teacher_audit["candidates"]:
@@ -148,12 +172,30 @@ def stage_sft_prepare(
                         raise
                     counts[native_family.replace("-", "_") + "_requests"] += requests
                 else:
+                    reference_sample = sample.pop("_reference_sample", None)
                     sample["messages"][0]["loss"] = False
                     sample["messages"][1]["loss"] = False
                     sample["_split"] = split
+                    if family == "atomic":
+                        sample["sample_id"] = hashlib.sha256((task_id + ":" + teacher_audit["exported_source"]).encode()).hexdigest()
+                        teacher_audit["sample_id"] = sample["sample_id"]
                     streams[family].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    if family == "atomic":
+                        counts["atomic_" + teacher_audit["exported_source"]] += 1
+                    if reference_sample is not None:
+                        reference_sample["_split"] = split
+                        reference_sample["sample_id"] = hashlib.sha256((task_id + ":audited_reference").encode()).hexdigest()
+                        streams[family].write(json.dumps(reference_sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+                        reference_audit = {"source": "audited_reference", "task_id": task_id, "split": split,
+                                           "sample_id": reference_sample["sample_id"], "task_type": task["task_type"],
+                                           "reference": teacher_audit["reference"]}
+                        streams["sidecar"].write(json.dumps(reference_audit, ensure_ascii=False) + "\n")
+                        counts["atomic_audited_reference"] += 1
+                        counts["atomic_accepted"] += 1
+                        counts[f"atomic_{split}"] += 1
                 sidecar = {
                     "task_id": task_id, "task_type": task["task_type"], "split": split,
+                    "sample_id": sample.get("sample_id"), "source": teacher_audit.get("exported_source", "teacher"),
                     "trajectory_id": sample.get("trajectory_id"),
                     "sample_format": sample.get("sample_format", "ms-swift messages"),
                     "capability": task.get("capability"), "financial_topic": financial_topic(task),

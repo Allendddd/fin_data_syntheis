@@ -137,10 +137,11 @@ def test_native_export_preserves_each_request_and_its_target(tmp_path):
         assert row["tools"] == request["tools"]
         assert row["messages"][:-1] == request["messages"]
         assert row["messages"][-1] == {"role": "assistant", "content": response["content"]}
-        assert row["loss_mask"] == [False] * len(request["messages"]) + [True]
+        assert row["loss_mask"] == [False] * len(request["messages"]) + [any(row["target_block_loss_mask"])]
         assert row["trajectory_id"] == bundle["trajectory_id"]
     assert rows[0]["tools"] != rows[1]["tools"]
-    assert rows[0]["target_block_loss_mask"] == [True, False, True]
+    assert rows[0]["target_block_loss_mask"] == [False, False, False]
+    assert rows[2]["target_block_loss_mask"] == [True, True]
     assert rows[4]["messages"][-1]["content"][-1]["name"] == "Bash"
     assert rows[5]["messages"][-1]["content"][-1]["type"] == "text"
     assert all(not tool["name"].startswith("mcp__") for row in rows for tool in row["tools"])
@@ -231,11 +232,11 @@ def test_native_rollout_prepare_and_publication_are_separate_from_ms_swift(tmp_p
         return RuntimeResult("completed")
 
     with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter([task()])),
-          patch("mint_synth.workflow.stages.sft_data._role_client") as json_client,
+          patch("mint_synth.workflow.stages.sft_data._role_client", return_value=__import__("test_natural_sft").Reviewer()) as json_client,
           patch("mint_synth.agents.cli_runtime.run_cli", side_effect=mock_cli),
           patch("mint_synth.agents.collector.FinanceToolBridge", side_effect=AssertionError("no finance bridge"))):
         metrics = stage_sft_prepare(layout, config, {}, 0, prepared)
-    json_client.assert_not_called()
+    assert json_client.call_count == 1 and json_client.call_args.args[-1] == "auditor"
     assert metrics["long_accepted"] == 1 and metrics["cc_native_requests"] == 6
     assert (prepared / "long.jsonl").read_text() == ""
     atomic_json(prepared / "_SUCCESS.json", {"metrics": metrics})

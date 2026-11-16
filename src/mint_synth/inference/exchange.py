@@ -7,6 +7,27 @@ from typing import Any, Mapping
 
 
 EXCHANGE_VERSION = 2
+TEXT_EXCHANGE_VERSION = 1
+
+
+def text_parts(message: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Preserve visible reasoning and answer text without parsing a JSON action."""
+    if message.get("tool_calls"):
+        raise ValueError("text completion received tool calls instead of an answer")
+    parts = []
+    for field in ("reasoning_content", "reasoning", "analysis", "content"):
+        value = message.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"unsupported text completion {field} format")
+        if value:
+            parts.append({"field": field, "text": value})
+    if message.get("reasoning_details"):
+        raise ValueError("text reasoning_details needs an explicit content adapter")
+    if not parts or not any(part["text"].strip() for part in parts):
+        raise ValueError("model returned empty answer text")
+    return parts
 
 
 def native_content(content: Any) -> tuple[dict[str, Any], str, str]:
@@ -65,7 +86,8 @@ def native_parts(message: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[
         # Preserve the teacher's update, not the harness's accumulated memory.
         parts.append({"kind": "memory", "value": action["memory"], "field": "parsed_response.memory"})
     if "final" in action:
-        parts.append({"kind": "final", "proof": action["final"], "field": "parsed_response.final"})
+        key = "text" if isinstance(action["final"], str) else "proof"
+        parts.append({"kind": "final", key: action["final"], "field": "parsed_response.final"})
     else:
         parts.append({"kind": "tool_call", "name": action.get("tool"),
                       "arguments": action.get("arguments", {}), "field": "parsed_response"})

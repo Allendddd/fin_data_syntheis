@@ -16,7 +16,7 @@ def long_rollout(
     config: Mapping[str, Any], registry: ToolRegistry | None = None,
     *, sample_key: str | None = None,
     runtime: RuntimeSettings | None = None, model: ModelSettings | None = None,
-    trace_dir: Path | None = None,
+    trace_dir: Path | None = None, verifier: Any = None,
 ) -> tuple[dict[str, Any] | None, str]:
     if runtime is not None and runtime.name != "native":
         if model is None or trace_dir is None:
@@ -25,10 +25,10 @@ def long_rollout(
 
         tools = registry if runtime.native_tools else registry or default_tool_registry()
         return collect_runtime(task, index_path, config, tools,
-                               model=model, runtime=runtime, trace_dir=trace_dir, sample_key=sample_key)
+                               model=model, runtime=runtime, trace_dir=trace_dir, sample_key=sample_key, verifier=verifier)
     try:
         sample, reason = _native_rollout(task, client, index_path, config, registry,
-                                         sample_key=sample_key, trace_dir=trace_dir)
+                                         sample_key=sample_key, trace_dir=trace_dir, verifier=verifier)
     except Exception as exc:
         _record_early_failure(trace_dir, task, f"native teacher failed ({type(exc).__name__})")
         raise
@@ -49,7 +49,7 @@ def _record_early_failure(trace_dir: Path | None, task: Mapping[str, Any], reaso
 
 def _native_rollout(
     task: Mapping[str, Any], client: Any, index_path: Path, config: Mapping[str, Any],
-    registry: ToolRegistry | None, *, sample_key: str | None, trace_dir: Path | None,
+    registry: ToolRegistry | None, *, sample_key: str | None, trace_dir: Path | None, verifier: Any = None,
 ) -> tuple[dict[str, Any] | None, str]:
     from mint_synth.agents.collector import normalized_sample
     from mint_synth.core.run_state import atomic_json
@@ -69,6 +69,7 @@ def _native_rollout(
         max_tool_calls=int(training["max_tool_steps"]),
         max_context_chars=int(training["max_context_chars"]),
         answer_tolerance=str(config["quality"]["answer_tolerance"]),
+        solution_reviewer=verifier, sample_key=sample_key,
     ) as session:
         events: list[dict[str, Any]] = []
         model_turns: list[dict[str, Any]] = []
@@ -108,10 +109,15 @@ def _native_rollout(
                     reason = "teacher returned non-object"
                     return None, reason
                 result = session.step(action)
+                session.record_model_text("\n\n".join(
+                    part["text"] for turn in model_turns for part in turn["assistant_parts"]
+                    if part.get("kind") in {"text", "reasoning", "reasoning_summary"} and isinstance(part.get("text"), str)))
                 observation = result["observation"]
                 if isinstance(observation, dict) and "error" in observation:
                     reason = str(observation["error"])
-                    return None, reason
+                    if session.done:
+                        return None, reason
+                    continue
                 if "final" in action:
                     snapshot = {"trace": session.trace, "system_prompt": session.system_prompt,
                                 "tools": session.tool_definitions, "audit": session.audit_record()}

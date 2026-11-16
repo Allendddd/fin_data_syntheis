@@ -4,7 +4,6 @@ from typing import Any, Mapping
 
 
 def atomic_messages(task: Mapping[str, Any], *, response: str | None = None) -> dict[str, Any]:
-    teacher_response = response is not None
     trace = task.get("reasoning_trace") or []
     lines = [str(step.get("statement", "")).strip() for step in trace if isinstance(step, dict)]
     lines = [line for line in lines if line]
@@ -16,13 +15,14 @@ def atomic_messages(task: Mapping[str, Any], *, response: str | None = None) -> 
     if not final:
         raise ValueError("atomic answer is empty")
     if response is None:
+        dimensions = " ".join(str(answer[key]) for key in ("scale", "unit") if answer.get(key))
+        if not answer.get("text") and dimensions:
+            final += " " + dimensions
         response = "\n".join(lines + [f"Final answer: {final}"])
     return {"messages": [
-        {"role": "system", "content": (
-            "Answer the financial question from the supplied context with a complete JSON evidence and calculation proof."
-            if teacher_response else
-            "Answer the financial question from the supplied context. Give an auditable derivation and final answer."
-        )},
-        {"role": "user", "content": f"Context:\n{task['input']['context']}\n\nQuestion:\n{task['question']}"},
+        {"role": "system", "content":
+            "Answer the financial question from the supplied context. Give the financial derivation needed "
+            "to justify your conclusion and the final answer, preserving the correct period, units and scale.", "loss": False},
+        {"role": "user", "content": f"Context:\n{task['input']['context']}\n\nQuestion:\n{task['question']}", "loss": False},
         {"role": "assistant", "content": response, "loss": True},
     ]}

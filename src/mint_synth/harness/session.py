@@ -15,7 +15,6 @@ from typing import Any, Mapping
 from mint_synth.harness.registry import ToolRegistry, default_tool_registry
 from mint_synth.harness.snapshot import SnapshotTools, published_date
 from mint_synth.harness.state import harness_system, visible_state
-from mint_synth.harness.verifier import typed_answer_ok, verify_proof
 from mint_synth.core.provenance import sha256_file
 
 
@@ -96,6 +95,7 @@ class HarnessSession:
         max_context_chars: int = 24000,
         answer_tolerance: str = "1e-6",
         allow_toolset_override: bool = False,
+        solution_reviewer: Any = None, sample_key: str | None = None,
     ) -> None:
         if max_steps < 1 or max_context_chars < 1:
             raise ValueError("harness limits must be positive")
@@ -109,6 +109,10 @@ class HarnessSession:
         self.max_steps = max_steps
         self.max_tool_calls = max_tool_calls if max_tool_calls is not None else max_steps - 1
         self.max_context_chars = max_context_chars
+        self.solution_reviewer = solution_reviewer
+        self.sample_key = sample_key
+        self._grade_cache = None
+        self._derivation_text = ""
         self.answer_tolerance = answer_tolerance
         self.tools: SnapshotTools | None = None
         self._trace: list[dict[str, Any]] = []
@@ -139,6 +143,8 @@ class HarnessSession:
             self.case.snapshot_path, self.case.cutoff,
             entity_id=self.case.entity_id, dated_only=self.case.dated_only,
         )
+        self._grade_cache = None
+        self._derivation_text = ""
         self._trace = []
         self._steps = 0
         self._tool_calls = 0
@@ -156,6 +162,11 @@ class HarnessSession:
     @property
     def done(self) -> bool:
         return self._done
+
+    def record_model_text(self, text: str) -> None:
+        """Collector-only input: actual visible CoT/text, never packed into the public state."""
+        self._derivation_text = text
+        self._grade_cache = None
 
     @property
     def tool_definitions(self) -> list[dict[str, Any]]:
@@ -206,6 +217,7 @@ class HarnessSession:
             raise RuntimeError("harness session is closed")
         if self._done:
             raise RuntimeError("harness episode is finished; call reset for a new rollout")
+        self._grade_cache = None
         self._steps += 1
         prior_evidence_count = len(self._ledger)
         prior_memory = copy.deepcopy(self._memory)
@@ -391,6 +403,7 @@ class HarnessSession:
             max_tool_calls=self.max_tool_calls, max_context_chars=self.max_context_chars,
             answer_tolerance=self.answer_tolerance,
             allow_toolset_override=self.allow_toolset_override,
+            solution_reviewer=self.solution_reviewer, sample_key=self.sample_key,
         )
         try:
             branch.restore(checkpoint if checkpoint is not None else self.checkpoint())
@@ -408,6 +421,7 @@ class HarnessSession:
             max_tool_calls=self.max_tool_calls, max_context_chars=self.max_context_chars,
             answer_tolerance=self.answer_tolerance,
             allow_toolset_override=self.allow_toolset_override,
+            solution_reviewer=self.solution_reviewer, sample_key=self.sample_key,
         )
         try:
             for previous in self._trace[:step - 1]:
@@ -419,93 +433,75 @@ class HarnessSession:
             branch.close()
 
     def grade(self) -> dict[str, Any]:
-        """Return private verifier feedback to the trainer after the episode ends."""
+        """Review the actual final response and evidence; recoverable errors are masked."""
+        from mint_synth.harness.solution import assess_solution
+
         if not self._done:
             raise RuntimeError("finish the harness episode before grading")
         if self.tools is None:
             raise RuntimeError("harness session is closed")
-        acquired = {
-            str(record["chunk_id"]): record for record in self._ledger
-            if record.get("kind") == "source_chunk" and record.get("status") == "ok"
-        }
-        missing: list[str] = []
-        mismatched: list[str] = []
-        for fact in self.case.task["evidence"]:
-            chunk_id = str(fact["chunk_id"])
-            record = acquired.get(chunk_id)
-            if record is None:
-                missing.append(chunk_id)
+        if self._grade_cache is not None:
+            return copy.deepcopy(self._grade_cache)
+        acquired: dict[str, str] = {}
+        mismatched = []
+        cutoff_valid = True
+        for record in self._ledger:
+            if record.get("kind") != "source_chunk" or record.get("status") != "ok":
                 continue
-            row = self.tools.db.execute(
-                "SELECT source_id,available_at,text FROM chunks WHERE chunk_id=?",
-                (chunk_id,),
-            ).fetchone()
-            quote = str(fact.get("quote") or "")
-            expected_date = published_date(fact.get("source_metadata") or {}, self.case.available_at_field)
+            chunk_id = str(record["chunk_id"])
             observed = self._trace[int(record["step"]) - 1]["observation"]
-            if (row is None or str(fact.get("source_id")) != row[0]
-                    or record["source_id"] != row[0] or record["available_at"] != row[1]
-                    or expected_date != row[1]
-                    or not quote or quote not in row[2]
-                    or not isinstance(observed, Mapping) or quote not in str(observed.get("text") or "")
-                    or (row[1] is not None and row[1] > self.case.cutoff)
-                    or (self.case.dated_only and row[1] is None)):
+            text = observed.get("text") if isinstance(observed, Mapping) else None
+            row = self.tools.db.execute(
+                "SELECT source_id,available_at,text FROM chunks WHERE chunk_id=?", (chunk_id,),
+            ).fetchone()
+            if (row is None or record.get("source_id") != row[0] or record.get("available_at") != row[1]
+                    or not isinstance(text, str) or not text or text not in row[2]):
                 mismatched.append(chunk_id)
-        answer_correct = False
-        derivation_valid = False
-        derivation_reason = "no final answer"
+                continue
+            cutoff_valid &= ((row[1] is None or row[1] <= self.case.cutoff)
+                             and (not self.case.dated_only or row[1] is not None))
+            acquired[chunk_id] = acquired.get(chunk_id, "") + "\n" + text
+        missing = []
+        # Compatibility for explicit structured submissions without a reviewer.
+        if self.solution_reviewer is None:
+            for fact in self.case.task["evidence"]:
+                chunk_id = str(fact["chunk_id"])
+                if str(fact.get("quote") or "") not in acquired.get(chunk_id, "") or chunk_id not in acquired:
+                    missing.append(chunk_id)
+        actions = [{"id": f"step-{entry['step']}", "name": entry["tool"],
+                    "arguments": entry["arguments"], "observation": entry["observation"],
+                    "failed": not entry["valid"],
+                    "known_tool": entry["tool"] in self.registry.names}
+                   for entry in self._trace if entry["tool"]]
+        verdict = {"accepted": False, "answer_correct": False, "derivation_valid": False, "reason": "no final answer"}
         if self._final:
-            try:
-                proof = json.loads(self._final)
-                answer_correct = typed_answer_ok(
-                    self.case.task, proof.get("answer") if isinstance(proof, Mapping) else None,
-                    self.answer_tolerance,
-                )
-                acquired_text = {
-                    chunk_id: str(self._trace[int(record["step"]) - 1]["observation"]["text"])
-                    for chunk_id, record in acquired.items()
-                    if isinstance(self._trace[int(record["step"]) - 1]["observation"], Mapping)
-                    and isinstance(self._trace[int(record["step"]) - 1]["observation"].get("text"), str)
-                }
-                derivation_valid, derivation_reason = verify_proof(
-                    self.case.task, proof, acquired=acquired_text, tolerance=self.answer_tolerance,
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                derivation_reason = "final is not a valid JSON proof"
-            except Exception as exc:
-                raise RuntimeError("hidden verifier task cannot be replayed") from exc
-        evidence_replayable = not missing and not mismatched
-        action_valid = self._invalid_actions == 0
-        cutoff_valid = all(
-            record.get("available_at") is None or str(record["available_at"]) <= self.case.cutoff
-            for record in self._ledger if record.get("kind") == "source_chunk"
-        )
-        accepted = bool(self._final) and evidence_replayable and derivation_valid and action_valid and cutoff_valid
-        reason = (
-            "accepted" if accepted else
-            "no final answer" if not self._final else
-            "required evidence was not acquired" if missing else
-            "evidence provenance did not replay" if mismatched else
-            "invalid action in trajectory" if not action_valid else
-            "evidence crossed the cutoff" if not cutoff_valid else
-            derivation_reason
-        )
-        return {
-            "accepted": accepted,
-            "reward": int(accepted),
-            "answer_correct": answer_correct,
-            "derivation_valid": derivation_valid,
-            "evidence_complete": evidence_replayable,
-            "evidence_replayable": evidence_replayable,
-            "action_valid": action_valid,
-            "cutoff_valid": cutoff_valid,
-            "missing_chunk_ids": sorted(set(missing)),
-            "mismatched_chunk_ids": sorted(set(mismatched)),
-            "reason": reason,
-            "step_relevance": self._step_relevance(),
-            "invalid_actions": self._invalid_actions,
+            material = self._final
+            if self.solution_reviewer is not None:
+                material = "\n\n".join([self._derivation_text, *[
+                    json.dumps([action["arguments"], action["observation"]], ensure_ascii=False)
+                    for action in actions], self._final])
+            verdict = assess_solution(self.case.task, material, self.solution_reviewer,
+                                      acquired=acquired, actions=actions, tolerance=self.answer_tolerance,
+                                      sample_key=self.sample_key, final_response=self._final)
+        evidence_valid = not missing and not mismatched
+        accepted = bool(self._final) and evidence_valid and verdict["accepted"] and cutoff_valid
+        if not evidence_valid:
+            verdict["reason"] = "required evidence was not acquired" if missing else "evidence provenance did not replay"
+        elif not cutoff_valid:
+            verdict["reason"] = "evidence crossed the cutoff"
+        flags = self._step_relevance()
+        if self.solution_reviewer is not None:
+            decisions = verdict.get("action_relevance", {})
+            flags = [bool(decisions.get(action["id"], {}).get("relevant")) for action in actions]
+        self._grade_cache = {
+            **verdict, "accepted": accepted, "reward": int(accepted),
+            "evidence_complete": evidence_valid, "evidence_replayable": evidence_valid,
+            "action_valid": self._invalid_actions == 0, "cutoff_valid": cutoff_valid,
+            "missing_chunk_ids": sorted(set(missing)), "mismatched_chunk_ids": sorted(set(mismatched)),
+            "step_relevance": flags, "invalid_actions": self._invalid_actions,
             "toolset_fingerprint": self.registry.fingerprint,
         }
+        return copy.deepcopy(self._grade_cache)
 
     def _step_relevance(self) -> list[bool]:
         seen_actions: set[str] = set()

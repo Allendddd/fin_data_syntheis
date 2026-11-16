@@ -71,7 +71,10 @@ def verify_proof(
     task: Mapping[str, Any], proof: Any, *, context: str | None = None,
     acquired: Mapping[str, str] | None = None, tolerance: str = "1e-6",
 ) -> tuple[bool, str]:
-    """Bind model-visible quotes and local operations to every hidden ancestor."""
+    """Read compatibility for the old structured contract, never a teacher prompt.
+
+    Natural-language teachers use harness.solution's independent candidate replay.
+    """
     if not isinstance(proof, Mapping) or set(proof) != {"answer", "facts", "constants", "steps", "terminal"}:
         return False, "final requires answer, facts, constants, steps, and terminal"
     facts = {str(f["fact_id"]): f for f in task.get("evidence", [])}
@@ -161,8 +164,11 @@ def verify_proof(
         params = item.get("params")
         if not isinstance(params, Mapping):
             return False, "operation params must be an object"
+        aliases = {"sum": "add", "difference": "subtract"}
+        canonical_op = lambda op: aliases.get(op, op)
         choices = [node_id for node_id, node in gold_steps.items() if node_id not in used
-                   and node.get("op") == item["op"] and node.get("inputs") == [mapped[value] for value in inputs]
+                   and canonical_op(node.get("op")) == canonical_op(item["op"])
+                   and node.get("inputs") == [mapped[value] for value in inputs]
                    and (node.get("params") or {}) == dict(params)]
         if len(choices) != 1:
             return False, "operation does not follow hidden graph dependencies"

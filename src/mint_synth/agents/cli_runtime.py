@@ -324,7 +324,7 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
                 prompt = (prepare_workspace(bridge, workdir, trace_dir, runtime="codex") if codex_native else
                           prepare_workspace(bridge, workdir, trace_dir)) if native else (
                     "Complete the financial query in this public state. Use only the finance MCP tools, "
-                    "and finish by calling submit_final with the proof.\n" + json.dumps(bridge.public_state(), ensure_ascii=False))
+                    "and finish by calling submit_final with your natural-language derivation and answer.\n" + json.dumps(bridge.public_state(), ensure_ascii=False))
                 with os.fdopen(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stdout:
                     with os.fdopen(os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stderr:
                         options: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {

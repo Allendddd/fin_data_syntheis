@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from mint_synth.inference.exchange import EXCHANGE_VERSION, native_parts
+from mint_synth.inference.exchange import EXCHANGE_VERSION, TEXT_EXCHANGE_VERSION, native_parts, text_parts
 
 
 class LLMError(RuntimeError):
@@ -43,6 +43,13 @@ class JsonLLM(Protocol):
         max_tokens: int = 4096,
         sample_key: str | None = None,
     ) -> dict[str, Any] | list[Any]: ...
+
+
+class TextLLM(Protocol):
+    def complete_text_exchange(
+        self, *, system: str, user: str, temperature: float = 0.0,
+        max_tokens: int = 4096, sample_key: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def parse_json_payload(content: Any) -> dict[str, Any] | list[Any]:
@@ -190,6 +197,32 @@ class OpenAICompatibleClient:
         self, *, system: str, user: str, temperature: float = 0.0,
         max_tokens: int = 4096, sample_key: str | None = None, native_action: bool = False,
     ) -> dict[str, Any]:
+        return self._complete_exchange(
+            system=system, user=user, temperature=temperature, max_tokens=max_tokens,
+            sample_key=sample_key, native_action=native_action, response_mode="json",
+        )
+
+    def complete_text(
+        self, *, system: str, user: str, temperature: float = 0.0,
+        max_tokens: int = 4096, sample_key: str | None = None,
+    ) -> str:
+        return self.complete_text_exchange(
+            system=system, user=user, temperature=temperature, max_tokens=max_tokens, sample_key=sample_key,
+        )["text"]
+
+    def complete_text_exchange(
+        self, *, system: str, user: str, temperature: float = 0.0,
+        max_tokens: int = 4096, sample_key: str | None = None,
+    ) -> dict[str, Any]:
+        return self._complete_exchange(
+            system=system, user=user, temperature=temperature, max_tokens=max_tokens,
+            sample_key=sample_key, native_action=False, response_mode="text",
+        )
+
+    def _complete_exchange(
+        self, *, system: str, user: str, temperature: float,
+        max_tokens: int, sample_key: str | None, native_action: bool, response_mode: str,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
@@ -199,7 +232,7 @@ class OpenAICompatibleClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        if self.config.strict_json:
+        if response_mode == "json" and self.config.strict_json:
             payload["response_format"] = {"type": "json_object"}
         if self.config.seed is not None:
             payload["seed"] = self.config.seed if sample_key is None else int.from_bytes(
@@ -215,6 +248,8 @@ class OpenAICompatibleClient:
             "protocol": "chat_completions", "request": payload, "attempts": [],
             "started_at": datetime.now(timezone.utc).isoformat(), "cache_hit": False,
         }
+        if response_mode == "text":
+            exchange.update(response_mode="text", text_exchange_version=TEXT_EXCHANGE_VERSION)
 
         last_error: BaseException | None = None
         self._increment(requests=1)
@@ -233,7 +268,16 @@ class OpenAICompatibleClient:
                 message = choices[0].get("message", {})
                 if not isinstance(message, dict):
                     raise LLMError("model response message is not an object")
-                if native_action:
+                if response_mode == "text":
+                    try:
+                        parts = text_parts(message)
+                    except ValueError as exc:
+                        raise LLMError(str(exc)) from exc
+                    parsed = "\n\n".join(part["text"] for part in parts)
+                    exchange.update(text=parsed, text_parts=parts, finish_reason=choices[0].get("finish_reason"))
+                elif native_action:
+                    if choices[0].get("finish_reason") in {"length", "content_filter"}:
+                        raise LLMError("native teacher response did not finish normally")
                     try:
                         parsed, parts = native_parts(message)
                     except ValueError as exc:

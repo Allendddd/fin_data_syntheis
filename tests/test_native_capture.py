@@ -174,7 +174,7 @@ def test_native_reads_are_audited_and_request_specific_protocol_is_preserved(tmp
                 assert row[key][:-1] == value
             else:
                 assert row[key] == value
-        assert row["sample_format"] == runtime + "_native_v1"
+        assert row["sample_format"] == runtime + "_native_v2"
         if runtime == "codex":
             assert row["output"] == response["output"]
             assert row["input_loss_mask"] == [False] * len(request["input"])
@@ -267,7 +267,7 @@ def test_native_final_binding_and_answer_are_independently_checked(tmp_path, run
     assert not audited["audit"]["verdict"]["accepted"]
     assert not audited["audit"]["verdict"]["answer_correct"]
     write_final(root, "Unbound CLI or SDK final", runtime)
-    with pytest.raises(TrajectoryError, match="not uniquely bound"):
+    with pytest.raises(TrajectoryError, match="not bound to a unique"):
         audit_native_capture(case, root, runtime)
 
 
@@ -401,13 +401,13 @@ def test_codex_and_strands_native_stage_publish_separately_and_count_trajectorie
         return RuntimeResult("completed")
 
     with (patch("mint_synth.workflow.stages.sft_data.iter_payloads", return_value=iter(tasks)),
-          patch("mint_synth.workflow.stages.sft_data._role_client") as client,
+          patch("mint_synth.workflow.stages.sft_data._role_client", return_value=__import__("test_natural_sft").Reviewer()) as client,
           patch("mint_synth.workflow.stages.sft_data.load_tool_registry", side_effect=AssertionError("no finance registry")),
           patch("mint_synth.agents.collector.FinanceToolBridge", side_effect=AssertionError("no finance bridge")),
           patch("mint_synth.agents.cli_runtime.run_cli", side_effect=run_mock),
           patch("mint_synth.agents.strands_runtime.run_strands", side_effect=run_mock)):
         metrics = stage_sft_prepare(layout, config, {}, 0, prepared)
-    client.assert_not_called()
+    assert client.call_count == 1 and client.call_args.args[-1] == "auditor"
     assert metrics["long_accepted"] == 2
     assert metrics["codex_native_requests"] == 4
     assert metrics["strands_native_requests"] == 3
@@ -424,8 +424,8 @@ def test_codex_and_strands_native_stage_publish_separately_and_count_trajectorie
     for runtime, count in (("codex", 4), ("strands", 3)):
         rows = [json.loads(line) for line in (root / f"{runtime}-native-train.jsonl").read_text().splitlines()]
         assert len(rows) == count
-        assert all(row["sample_format"] == runtime + "_native_v1" and "_split" not in row for row in rows)
-        assert manifest["formats"][runtime + "-native"] == runtime + "_native_v1"
+        assert all(row["sample_format"] == runtime + "_native_v2" and "_split" not in row for row in rows)
+        assert manifest["formats"][runtime + "-native"] == runtime + "_native_v2"
         assert manifest["counts"][runtime + "_native_train_trajectories"] == 1
     assert (root / "long-train.jsonl").read_text() == ""
     entries = [json.loads(line) for line in (root / "trajectory-index.jsonl").read_text().splitlines()]

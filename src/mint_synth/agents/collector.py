@@ -26,7 +26,7 @@ from .native_capture import audit_native_capture, export_native_capture
 
 def collect_runtime(
     task: Mapping[str, Any], index_path: Path, config: Mapping[str, Any], registry: ToolRegistry | None,
-    *, model: ModelSettings, runtime: RuntimeSettings, trace_dir: Path, sample_key: str | None,
+    *, model: ModelSettings, runtime: RuntimeSettings, trace_dir: Path, sample_key: str | None, verifier: Any = None,
 ) -> tuple[dict[str, Any] | None, str]:
     trace_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     if os.name == "posix":
@@ -47,7 +47,8 @@ def collect_runtime(
             max_tool_calls=int(training["max_tool_steps"]),
             max_context_chars=int(training["max_context_chars"]),
             answer_tolerance=str(config["quality"]["answer_tolerance"]),
-        ), call_timeout=min(model.timeout_seconds, runtime.timeout_seconds))
+            solution_reviewer=verifier, sample_key=sample_key,
+        ), call_timeout=min(model.timeout_seconds, runtime.timeout_seconds), defer_review=verifier is not None)
         with context as bridge:
             proxy = TraceProxyServer(TraceProxyConfig(upstream=model.origin, output_dir=trace_dir / "model",
                                                      run_id=run_id, port=0))
@@ -74,11 +75,15 @@ def collect_runtime(
             if runtime.native_tools:
                 if result.status == "completed":
                     if claude_native:
-                        snapshot = audit_native(case, trace_dir, tolerance=str(config["quality"]["answer_tolerance"]))
+                        snapshot = audit_native(case, trace_dir, tolerance=str(config["quality"]["answer_tolerance"]), reviewer=verifier)
                     else:
-                        snapshot = audit_native_capture(case, trace_dir, runtime.name, tolerance=str(config["quality"]["answer_tolerance"]))
+                        snapshot = audit_native_capture(case, trace_dir, runtime.name, tolerance=str(config["quality"]["answer_tolerance"]), reviewer=verifier)
             else:
-                snapshot = bridge.snapshot()
+                if result.status == "completed" and verifier is not None:
+                    turns = load_model_turns(trace_dir, {item["function"]["name"] for item in bridge.tool_definitions})
+                    snapshot = bridge.review_model_turns(turns)
+                else:
+                    snapshot = bridge.snapshot()
         verdict = snapshot.get("audit", {}).get("verdict", {})
         if result.status == "completed" and bool(verdict.get("accepted")):
             if claude_native:

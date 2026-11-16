@@ -95,7 +95,7 @@ v3 长任务先把分析师种子的目标类型、推导形式与必需事实�
 
 ## 7. 未公开部分与工程补全
 
-论文未公开原始构造 prompt、模型/解码组合、source-pack mining 算法、`h_min/b_min` 取值、完整 analyst seed bank、训练比例和完整 harness。v2 的公式注册表、实体规则、物理 shuffle、默认阈值和 YAML schema 都属于可审计工程补全。v3 的教师证明 JSON、确定性候选选择和种子规格映射也属于工程补全，并非论文内部格式或评判器的逐字复现。
+论文未公开原始构造 prompt、模型/解码组合、source-pack mining 算法、`h_min/b_min` 取值、完整 analyst seed bank、训练比例和完整 harness。v2 的公式注册表、实体规则、物理 shuffle、默认阈值和 YAML schema 都属于可审计工程补全。v3 的自由文本审核、私有候选图提取、judge rubric、参考 r 的抽样比例及种子规格映射属于工程补全，不是论文内部实现的逐字复现。教师不要求 proof JSON，内部任务图与审计 JSON 保留。数值回放可确定性核验已提取的运算，但语义支持性、期间解释及推导提取依赖审核模型。
 
 因此合适的描述是 method-level reproduction 或 faithful reimplementation of published constraints，而不是官方数据集的 exact reproduction。
 

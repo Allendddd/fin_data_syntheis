@@ -61,7 +61,12 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "atomic_teacher_roles": {"type": "array", "minItems": 1, "uniqueItems": True,
                                           "items": {"type": "string", "minLength": 1}, "default": ["constructor"]},
                 "atomic_samples_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},
-                "atomic_selection_policy": {"enum": ["concise", "first_valid"], "default": "concise"},
+                "atomic_selection_policy": {"enum": ["judge", "concise", "first_valid"], "default": "judge"},
+                "atomic_verifier_role": {"type": "string", "minLength": 1, "default": "auditor"},
+                "atomic_judge_role": {"type": "string", "minLength": 1, "default": "auditor"},
+                "atomic_include_reference": {"type": "boolean", "default": True},
+                "atomic_reference_fraction": {"type": "number", "minimum": 0, "maximum": 1, "default": 1.0},
+                "long_verifier_role": {"type": "string", "minLength": 1, "default": "auditor"},
                 "atomic_audit_fallback": {"type": "boolean", "default": False},
                 "long_teacher_roles": {"type": "array", "uniqueItems": True,
                                        "items": {"type": "string", "minLength": 1}, "default": []},
@@ -210,7 +215,12 @@ def validate_cross_fields(config: Mapping[str, Any]) -> None:
             missing = set(training.get("atomic_teacher_roles", ["constructor"])) - set(roles)
             if missing:
                 raise ConfigError(f"training.atomic_teacher_roles references unknown roles: {sorted(missing)}")
+            for key in ("atomic_verifier_role", "atomic_judge_role"):
+                if training.get(key, "auditor") not in roles:
+                    raise ConfigError(f"training.{key} references unknown role: {training.get(key)}")
         if sft_enabled and training.get("long_enabled", True):
+            if training.get("long_verifier_role", "auditor") not in roles:
+                raise ConfigError("training.long_verifier_role references an unknown role")
             requested = training.get("long_teacher_roles") or [training.get("teacher_role")]
             missing = set(requested) - set(roles)
             if missing:

@@ -739,10 +739,10 @@
             </div>
           </article>
           <article class="branch long">
-            <div class="branch-head"><h3>教师证明生成</h3><p>context + question → 多个 proof 候选 → 严格证明校验 → 简洁候选</p></div>
+            <div class="branch-head"><h3>教师解答生成</h3><p>context + question → 自然语言与可见 CoT → 内容审核及计算回放 → LLM judge</p></div>
             <div class="branch-body">
-              <p>默认每个 atomic teacher role 为每任务采样 <b>2 个</b>证明，保留通过隐藏图结构、值与 quote 校验的候选，再选最短合格 proof。</p>
-              <p>最终 user 内容包含 context 与 question，assistant 为教师实际生成的证明 JSON。默认 <code>atomic_audit_fallback=false</code>，不会在所有教师失败后直接用审计文本替代实际教师输出。</p>
+              <p>默认各教师采样 <b>2 个</b>自然语言解答，私有审核提取实际推导并重算，再由 judge 按正确性、完整性和清晰度择优。</p>
+              <p>教师只看到 context 与 question，assistant 保留实际可见推理和答案。已审核参考 r 经复核后作为独立来源入样，可配置抽样比例，同任务共享 split。</p>
             </div>
           </article>
         </div>
@@ -765,7 +765,7 @@
           <div><strong>5 · 最终证明</strong><small>提交 facts / steps / answer，私有 verifier 校验后决定接受</small></div>
         </div>
         <p>上图是 <b>finance 金融工具模式</b> 的典型路径。教师可多次搜索、打开与计算，也可直接在证明中给出可回放步骤；<b>并不强制调用 calculate 才算完成</b>。成功标准是已取得必需证据并提交正确证明。</p>
-        <div class="ribbon"><b>原生工具模式的另一条执行路径：</b>query + 冻结语料目录 → Codex 自带 shell / 文件工具，或 Strands 官方 file_read / shell，或 CC 自带 Read / Bash → 正常最终回复中的 JSON proof → 读取与文件完整性核对 → 隐藏图离线校验。此路径不创建金融 session / bridge / MCP，也不注册 submit_final；保留框架本来的工具名、schema 与 system。</div>
+        <div class="ribbon"><b>原生工具模式的另一条执行路径：</b>query + 冻结语料目录 → Codex 自带 shell / 文件工具，或 Strands 官方 file_read / shell，或 CC 自带 Read / Bash → 正常最终回复中的自然语言推导和答案 → 读取与文件完整性核对 → 隐藏图离线校验。此路径不创建金融 session / bridge / MCP，也不注册 submit_final；保留框架本来的工具名、schema 与 system。</div>
         <div class="table-wrap" style="margin-top:18px">
           <table>
             <thead><tr><th>runtime</th><th>agent loop 与环境连接</th><th>所需模型协议</th><th>原始运行轨迹</th></tr></thead>
@@ -789,8 +789,8 @@
           </article>
           <article class="card">
             <h3>统一验收，执行路径各自保留</h3>
-            <p>金融模式的外部 runtime 通过 <code>submit_final(proof)</code> 提交，项目 JSON runtime 使用 final 动作；原生模式从框架最后正常回复取得 proof，并唯一绑定到实际模型响应。</p>
-            <p>proof 的固定结构为 <code>answer / facts / constants / steps / terminal</code>；事实必须来自实际读取的来源文本，步骤覆盖隐藏 gold DAG 的操作、输入顺序和维度。</p>
+            <p>金融模式的外部 runtime 通过 <code>submit_final(answer)</code> 提交，项目 JSON runtime 使用 final 动作；原生模式从框架最后正常回复取得实际解答，并唯一绑定到实际模型响应。</p>
+            <p>教师不受固定 proof schema 约束。审核 JSON 与候选图仅在后台使用；来源必须实际取得，回放候选自身计算并认可等价路径。可恢复错误允许继续，错误、重复、无贡献动作及关联推理屏蔽 loss。</p>
             <p>两种模式都检查答案、来源和完整证明。原生模式还核对未改写的语料文件、读取调用 ID 与真实返回，不接受用打印引文伪造读取。CLI 返回 0 或 SDK 自然结束本身不足以接收样本。</p>
           </article>
         </div>
@@ -798,7 +798,7 @@
           <summary>技术细节：冻结检索、教师采样、mask 与运行边界</summary>
           <div>
             <p><b>检索：</b>corpus_index 保存截止日前及无有效日期的 chunks；retrieval_index 依实体事实建立 source 与 canonical_entity_id 的关联，复制关联来源的完整 chunks，包含未抽取出事实的片段，并建立 SQLite FTS5 trigram 索引，必要时使用 LIKE 回退。当前实现没有 embedding / 向量数据库。检索和打开限制 canonical_entity_id、cutoff，时间敏感任务另要求 dated_only。</p>
-            <p><b>金融工具契约：</b>search_corpus(query, limit) 最多返回 10 条，带 chunk_id、source_id、日期和前 350 字符 snippet；open_chunk 只能打开之前搜索命中的 chunk，返回完整正文。calculate(operation, values) 支持 add / subtract / multiply / divide / percent_change / average，values 为 2–12 个数；它的操作集与隐藏 DAG replay 不完全相同，例如比率可用 divide 求值，最终 proof 仍按 gold 的 ratio 操作描述。</p>
+            <p><b>金融工具契约：</b>search_corpus(query, limit) 最多返回 10 条，带 chunk_id、source_id、日期和前 350 字符 snippet；open_chunk 只能打开之前搜索命中的 chunk，返回完整正文。calculate(operation, values) 支持 add / subtract / multiply / divide / percent_change / average，values 为 2–12 个数；它的操作集与隐藏 DAG replay 不完全相同，例如比率可用 divide 求值，最终解答无需复刻 gold 操作名称，候选运算仍须满足金融关系和正确答案。</p>
             <p><b>原生工具契约：</b>配置 <code>codex.mode / strands.mode / claude_code.mode: native</code> 启用相应框架的工具。语料包含该实体所有可见分块及干扰材料，公开清单只有来源、日期、路径、chunk ID 与指纹，不按 gold evidence 挑选。来源读取按原生 call ID 与后续工具返回绑定；任意脚本可辅助研究，但不能仅因输出含正确 quote 就作为已取证来源。精确可识别读取形式以离线校验实现为准。</p>
             <p><b>上下文：</b>native 将公开状态按 max_context_chars 打包；Strands 和 CLI 使用各自消息历史管理，因此不同 runtime 的模型可见上下文与行为不完全一致。不能直接承诺迁移 runtime 会提高合格率。</p>
             <p><b>采样：</b>长程按 long_teacher_roles 轮换尝试，总次数受 rollouts_per_task 限制；出现首条合格轨迹即停止。它不是对每种 runtime 完整采样后再全局择优。失败 / 超时尝试也记录在 trajectory-index 与 audit 引用中。</p>
@@ -834,7 +834,7 @@
     {"role":"user","content":"研究问题…","loss":false},
     {"role":"tool_call","content":"{\"name\":\"search_corpus\",\"arguments\":{…}}","loss":true},
     {"role":"tool_response","content":"检索结果…","loss":false},
-    {"role":"assistant","content":"教师最终证明 JSON…","loss":true}
+    {"role":"assistant","content":"教师实际生成的推导与最终答案…","loss":true}
   ],
   "tools": "序列化的工具定义 JSON"
 }</pre>
@@ -849,9 +849,9 @@
               <tr><td>queries/hidden-verifier.jsonl</td><td>私有答案图、证据、快照引用和 query 关联信息</td></tr>
               <tr><td>sft/atomic-train.jsonl、atomic-val.jsonl</td><td>context + question 与通过证明校验的 Atomic 教师输出</td></tr>
               <tr><td>sft/long-train.jsonl、long-val.jsonl</td><td>query + 规范化工具动作 / 观察 + 最终证明，含 loss mask</td></tr>
-              <tr><td>sft/codex-native-train.jsonl、codex-native-val.jsonl</td><td>codex_native_v1：实际 Responses request 与完整 output，保留原生工具及输入 / 输出监督范围</td></tr>
-              <tr><td>sft/strands-native-train.jsonl、strands-native-val.jsonl</td><td>strands_native_v1：实际 Chat Completions request，加本次原生 assistant message 与 loss mask</td></tr>
-              <tr><td>sft/cc-native-train.jsonl、cc-native-val.jsonl</td><td>claude_code_native_v1：实际 Anthropic request，加本次响应内容块和 block loss mask</td></tr>
+              <tr><td>sft/codex-native-train.jsonl、codex-native-val.jsonl</td><td>codex_native_v2：实际 Responses request 与完整 output，按动作贡献标注输出及可见推理，opaque 内容不训练</td></tr>
+              <tr><td>sft/strands-native-train.jsonl、strands-native-val.jsonl</td><td>strands_native_v2：实际 Chat Completions request，加本次 assistant message、文本与逐调用 loss mask</td></tr>
+              <tr><td>sft/cc-native-train.jsonl、cc-native-val.jsonl</td><td>claude_code_native_v2：实际 Anthropic request，加本次原始响应内容块及相关性 block loss mask</td></tr>
               <tr><td>sft/audit-sidecar.jsonl</td><td>标签、答案、证据与教师候选审核；不进入模型输入</td></tr>
               <tr><td>sft/trajectory-index.jsonl</td><td>每次长程教师尝试的 task_id、role、attempt、runtime、model、trace、accepted、reason；运行 status 见 result.json</td></tr>
               <tr><td>sft/traces/&lt;shard&gt;/&lt;attempt_hash&gt;/</td><td>result.json，及通常包含的 environment.json、对应 HTTP / SDK / CLI 文件；native 早期初始化失败可能只有 result.json</td></tr>

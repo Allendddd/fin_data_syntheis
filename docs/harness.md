@@ -10,16 +10,20 @@
 
 ```python
 from mint_synth.harness import HarnessSession, iter_cases, load_tool_registry
+from mint_synth.core.config_v2 import load_config
+from mint_synth.inference.runtime import client_for_role
 
 case = next(iter_cases("/path/to/outputs/runs/<run_id>", split="train"))
 registry = load_tool_registry()  # 配置了自定义工具时填入 package.module:register_tools
 
-with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16) as session:
+reviewer = client_for_role(load_config("/path/to/config.yaml"), "auditor")  # 仅环境侧使用
+with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16,
+                    solution_reviewer=reviewer) as session:
     visible = session.observe()
     pre_action = session.checkpoint()
     result = session.step({"tool": "search_corpus", "arguments": {"query": "营业收入"}})
     visible = session.observe()
-    # 后续由调用方提供动作；结束动作是 {"final": "<结构化证明 JSON 字符串>"}。
+    # 后续由调用方提供动作；结束动作是 {"final": "<实际自然语言金融推导和答案>"}。
     # episode 结束后，环境进程才调用 session.grade() 取得私有校验结果。
 ```
 
@@ -29,13 +33,13 @@ with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16) as
 
 `checkpoint()` 返回不含隐藏任务的 JSON 可序列化动作前状态。已结束的轨迹可用 `checkpoint_at(step)` 重建第 `step` 次动作之前的状态，用于外部系统选定失败轨迹的关键步骤。`restore(checkpoint)` 会核对 query、快照 SHA-256、工具集指纹、截止日和预算，然后在新会话里重放历史并逐条比较观察。`fork(checkpoint)` 创建隔离分支，供同一关键步骤多次采样。自定义工具必须确定性且只读，否则重放会拒绝漂移结果。checkpoint 应保存在训练器自己的目录；本项目不生产学生轨迹数据集。
 
-`grade()` 只能在 episode 结束后调用，返回 `answer_correct`、`derivation_valid`、`evidence_replayable`、`action_valid`、`cutoff_valid`、`accepted` 和二值 `reward`；`audit_record()` 合并完整轨迹、账本、失败路径与私有判定，供环境进程留档。证据路径要求取得每个必需 chunk，且其来源 ID、原文引句和截止日可在冻结快照及实际工具观察中重放。`final` 仍是字符串，但其内容必须是 JSON 对象，包含 `answer`、`facts`、`constants`、`steps`、`terminal`。事实使用模型自定义局部 ID、已打开的 `chunk_id`、逐字 `quote`、值及 `unit`/`scale`/`currency`；运算步骤按依赖顺序列出局部输入 ID、操作、`params`、结果及维度。无常量或无运算时用空数组。下面是两项披露值相加的格式示意：
+`grade()` 在 episode 结束后调用，返回答案、推导、来源、时间边界及整体判定，并提供逐动作 step_relevance。final 可以是自然语言，公开提示和工具不要求 proof JSON。solution_reviewer 在环境侧独立审核实际解答、可见推理及动作，提取候选自身的计算和来源锚点，本地核验引文、数值、维度和计算；不要求逐节点复刻参考图。没有审核器时仅兼容旧结构化提交，自然语言明确拒绝。
 
-```json
-{"answer":{"value":"160","unit":"USD","scale":"million","currency":"USD"},"facts":[{"id":"a","chunk_id":"c1","quote":"Revenue was $100 million.","value":"100","unit":"USD","scale":"million","currency":"USD"},{"id":"b","chunk_id":"c2","quote":"Revenue was $60 million.","value":"60","unit":"USD","scale":"million","currency":"USD"}],"constants":[],"steps":[{"id":"total","op":"add","inputs":["a","b"],"params":{},"result":"160","unit":"USD","scale":"million","currency":"USD"}],"terminal":"total"}
-```
+语义等价、金融关系、期间及推导提取依赖审核模型，存在误判；无法可靠验证时拒绝，不得从 gold 补写推导。调用方可通过私有 record_model_text(actual_visible_text) 提供真实可见 CoT，不会向下一步公开观察注入审核内容。知识及文本分析不强制算术步骤。
 
-校验器把每个引句绑定到实际打开的快照来源，再将完整步骤映射到隐藏答案图并重算。只读完证据、只写正确答案、单位错误或省略中间运算都不能通过；无法可靠核验的自由文本也会被拒绝。教师 SFT 与外部 rollout 共用这一契约；无关但有效的工具调用可由 `step_relevance` 屏蔽损失，工具观察始终不参与 loss。该 JSON 是本项目的可审计工程契约，并非论文公开的 MintHarness 内部格式。
+可恢复工具错误保留为观察且不增加证据，agent 可在预算内继续。最终合格轨迹允许含已恢复错误；action_valid 仍记录是否出现过无效动作，但不再统一否决。错误、重复、无贡献动作及相关文字屏蔽 loss，历史保留；环境观察和输入不作为预测目标。超预算、无最终回答、来源越界和不可恢复错误继续失败。
+
+结束会话的审核结果缓存，重复 grade() 不重复调用模型；reset/恢复及新模型内容使缓存失效。checkpoint 和模型可见状态不包含隐藏审核反馈。所有内容审核、候选图及相关性依据只由私有审计端持有。
 
 ## 扩展工具
 

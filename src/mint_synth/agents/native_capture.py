@@ -13,25 +13,20 @@ import json
 import os
 import re
 import shlex
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping
 
 from mint_synth.core.run_state import atomic_json
 from mint_synth.harness.session import HarnessCase
-from mint_synth.harness.snapshot import published_date
-from mint_synth.harness.verifier import typed_answer_ok, verify_proof
-
-from .cc_workspace import _digest, _proof_from_text, _read_path
+from .cc_workspace import _read_path
 from .model_trace import _sse_events, iter_captured_calls
 from .trajectory import TrajectoryError
 
 
 NATIVE_FORMATS = {
-    "claude_code_native_v1": "cc-native",
-    "codex_native_v1": "codex-native",
-    "strands_native_v1": "strands-native",
+    "claude_code_native_v2": "cc-native",
+    "codex_native_v2": "codex-native",
+    "strands_native_v2": "strands-native",
 }
 
 
@@ -134,7 +129,7 @@ def _declared_tools(request: Mapping[str, Any]) -> set[str]:
     return names(request.get("tools", []))
 
 
-def _uses(call: Mapping[str, Any], response: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False) -> list[dict[str, Any]]:
     declared = _declared_tools(call["request"])
     result = []
     if call["protocol"] == "responses":
@@ -142,7 +137,7 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any]) -> list[dict[str
             kind = item.get("type", "")
             if kind in {"function_call", "custom_tool_call"}:
                 name = item.get("name")
-                if name not in declared or str(name).startswith("mcp__"):
+                if (name not in declared and not allow_unknown) or str(name).startswith("mcp__"):
                     raise TrajectoryError("native response used an undeclared or MCP tool")
                 arguments = item.get("arguments") if kind == "function_call" else item.get("input")
                 if kind == "function_call":
@@ -152,7 +147,7 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any]) -> list[dict[str
                 else:
                     # Free-form input (for example apply_patch) stays free-form.
                     arguments = {"_raw_input": arguments}
-                result.append({"id": item.get("call_id"), "name": name, "input": arguments})
+                result.append({"id": item.get("call_id"), "name": name, "input": arguments, "known_tool": name in declared})
             elif kind.startswith("mcp_"):
                 raise TrajectoryError("native capture contains an MCP operation")
             elif kind == "shell_call":
@@ -165,20 +160,20 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any]) -> list[dict[str
         for item in response["choices"][0]["message"].get("tool_calls", []) or []:
             function = item.get("function", {})
             name = function.get("name")
-            if name not in declared or str(name).startswith("mcp__"):
+            if (name not in declared and not allow_unknown) or str(name).startswith("mcp__"):
                 raise TrajectoryError("native response used an undeclared or MCP tool")
             arguments = function.get("arguments", {})
             arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
             if not isinstance(arguments, dict):
                 raise TrajectoryError("native function arguments must be an object")
-            result.append({"id": item.get("id"), "name": name, "input": arguments})
+            result.append({"id": item.get("id"), "name": name, "input": arguments, "known_tool": name in declared})
     if any(not isinstance(item["id"], str) or not item["id"] for item in result):
         raise TrajectoryError("native tool call has no call ID")
     return result
 
 
-def _reply(call: Mapping[str, Any], response: Mapping[str, Any]) -> tuple[str, str | None]:
-    if _uses(call, response):
+def _reply(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False) -> tuple[str, str | None]:
+    if _uses(call, response, allow_unknown=allow_unknown):
         return "", None
     if call["protocol"] == "responses":
         messages = [item for item in response["output"] if item.get("type") == "message" and item.get("phase") != "commentary"]
@@ -209,7 +204,8 @@ def _returned_text(value: Any) -> str:
             decoded = json.loads(value)
         except ValueError:
             decoded = None
-        if isinstance(decoded, (dict, list)):
+        if isinstance(decoded, list) or isinstance(decoded, dict) and any(
+            key in decoded for key in ("content", "stdout", "output", "text", "is_error", "status", "outcome")):
             return _returned_text(decoded)
         # The official reader wraps source text with this heading. Status-like
         # lines inside that source are evidence, not shell execution metadata.
@@ -257,110 +253,17 @@ def _source_path(use: Mapping[str, Any], *, runtime: str | None = None) -> str |
     return None
 
 
-def audit_native_capture(case: HarnessCase, trace_dir: Path, runtime: str, *, tolerance: str = "1e-6") -> dict[str, Any]:
-    manifest = json.loads((trace_dir / "native-workspace.json").read_text(encoding="utf-8"))
-    if not manifest.get("integrity", {}).get("valid") or manifest.get("cutoff") != case.cutoff:
-        raise TrajectoryError("native corpus workspace failed its integrity check")
-    root = Path(manifest["workspace_root"])
-    sources = {(root / item["file"]).resolve(): item for item in manifest["sources"]}
-    if runtime == "codex":
-        from .codex_events import native_final_reply
-        final_text, final_id = native_final_reply(trace_dir / "stdout.jsonl")
-        protocol = "responses"
-    elif runtime == "strands":
-        final = json.loads((trace_dir / "native-final.json").read_text(encoding="utf-8"))
-        final_text, final_id = final["text"].strip(), None
-        protocol = "chat_completions"
-    else:
+def audit_native_capture(case: HarnessCase, trace_dir: Path, runtime: str, *, tolerance: str = "1e-6",
+                         reviewer: Any = None) -> dict[str, Any]:
+    from .native_audit import audit_trace
+
+    if runtime not in {"codex", "strands"}:
         raise ValueError("native capture runtime must be codex or strands")
-    positions, uses, final_matches = {}, {}, []
-    for position, call in enumerate(iter_captured_calls(trace_dir)):
-        if call["protocol"] != protocol or call["call_id"] in positions:
-            raise TrajectoryError("native capture has an unexpected protocol or duplicate call ID")
-        positions[call["call_id"]] = position
-        response = native_response(call)
-        text, message_id = _reply(call, response)
-        if final_text and text == final_text and (final_id is None or final_id == message_id):
-            final_matches.append((call["call_id"], message_id))
-        for use in _uses(call, response):
-            if use["id"] in uses:
-                raise TrajectoryError("native capture has an ambiguous tool call ID")
-            uses[use["id"]] = (call["call_id"], use)
-    if len(final_matches) != 1:
-        raise TrajectoryError("native final reply is not uniquely bound to a captured model response")
-    final_call_id, message_id = final_matches[0]
-    failed_tool_ids = set()
-    if runtime == "strands" and (trace_dir / "agent.messages.json").is_file():
-        # The OpenAI adapter may flatten toolResult.content and omit status.
-        # Keep a known SDK execution failure from becoming successful evidence.
-        for message in json.loads((trace_dir / "agent.messages.json").read_text(encoding="utf-8")):
-            for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
-                result = block.get("toolResult", {}) if isinstance(block, dict) else {}
-                if result.get("status") == "error":
-                    failed_tool_ids.add(result.get("toolUseId"))
-    acquired, bindings, seen = {}, [], set()
-    for call in iter_captured_calls(trace_dir):
-        if positions[call["call_id"]] > positions[final_call_id]:
-            continue
-        for use_id, output in _results(call):
-            if use_id not in uses or use_id in failed_tool_ids:
-                continue
-            use_call_id, use = uses[use_id]
-            if positions[use_call_id] >= positions[call["call_id"]]:
-                continue
-            path = _source_path(use, runtime=runtime)
-            if not isinstance(path, str):
-                continue
-            source = sources.get((root / Path(path)).resolve())
-            text = _returned_text(output)
-            if source is None or not text or (use_id, text) in seen:
-                continue
-            if use["name"] == "file_read":
-                text = re.sub(r"(?m)^\s*\d+(?:→|\t|\s*\|\s)", "", text)
-            seen.add((use_id, text))
-            chunk_id = source["chunk_id"]
-            acquired[chunk_id] = acquired.get(chunk_id, "") + "\n" + text
-            bindings.append({"tool_use_id": use_id, "tool": use["name"], "chunk_id": chunk_id,
-                             "call_id": use_call_id, "observed_in_call": call["call_id"], "text_sha256": _digest(text.encode())})
-    missing, mismatched = [], []
-    by_chunk = {source["chunk_id"]: source for source in manifest["sources"]}
-    with closing(sqlite3.connect(case.snapshot_path.as_uri() + "?mode=ro", uri=True)) as db:
-        for fact in case.task["evidence"]:
-            chunk_id = str(fact["chunk_id"])
-            source = by_chunk.get(chunk_id)
-            if chunk_id not in acquired:
-                missing.append(chunk_id)
-                continue
-            row = db.execute("SELECT source_id,available_at,text FROM chunks WHERE chunk_id=?", (chunk_id,)).fetchone()
-            quote = str(fact.get("quote") or "")
-            if (source is None or row is None or source["source_id"] != row[0] or fact.get("source_id") != row[0]
-                    or source["available_at"] != row[1]
-                    or published_date(fact.get("source_metadata") or {}, case.available_at_field) != row[1]
-                    or source["sha256"] != _digest(row[2].encode())
-                    or not quote or quote not in row[2] or quote not in acquired[chunk_id]):
-                mismatched.append(chunk_id)
-    proof = _proof_from_text(final_text)
-    answer_correct = typed_answer_ok(case.task, proof.get("answer"), tolerance)
-    derivation_valid, derivation_reason = verify_proof(case.task, proof, acquired=acquired, tolerance=tolerance)
-    cutoff_valid = all((source["available_at"] is None or source["available_at"] <= case.cutoff)
-                       and (not case.dated_only or source["available_at"] is not None)
-                       for source in manifest["sources"] if source["chunk_id"] in acquired)
-    evidence_valid = not missing and not mismatched
-    accepted = evidence_valid and derivation_valid and cutoff_valid
-    verdict = {"accepted": accepted, "answer_correct": answer_correct, "derivation_valid": derivation_valid,
-               "evidence_replayable": evidence_valid, "cutoff_valid": cutoff_valid,
-               "missing_chunk_ids": missing, "mismatched_chunk_ids": mismatched,
-               "reason": ("accepted" if accepted else "required evidence was not acquired" if missing else
-                          "evidence provenance did not replay" if mismatched else
-                          "evidence crossed the cutoff" if not cutoff_valid else derivation_reason)}
-    record = {"format_version": 1, "mode": runtime + "_native", "audit": {"verdict": verdict},
-              "read_bindings": bindings, "final_call_id": final_call_id, "final_message_id": message_id}
-    atomic_json(trace_dir / "native-audit.json", record)
-    return record
+    return audit_trace(case, trace_dir, runtime, tolerance=tolerance, reviewer=reviewer)
 
 
 def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime: str) -> dict[str, Any]:
-    sample_format = runtime + "_native_v1"
+    sample_format = runtime + "_native_v2"
     if runtime not in {"codex", "strands"} or not snapshot.get("audit", {}).get("verdict", {}).get("accepted"):
         raise TrajectoryError("native export requires an accepted offline audit")
     fingerprint = hashlib.sha256()
@@ -376,7 +279,14 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
             if call["protocol"] != expected:
                 raise TrajectoryError("native export protocol mismatch")
             response = native_response(call)
-            _uses(call, response)  # Validate actual calls against this request's native definitions.
+            uses = _uses(call, response, allow_unknown=True)
+            flags = snapshot.get("action_relevance", {})
+            if any(use["id"] not in flags for use in uses):
+                raise TrajectoryError("native export has no action relevance decision")
+            for use in uses:
+                if use.get("known_tool") is False and use["id"] not in snapshot.get("failed_tool_ids", []):
+                    raise TrajectoryError("native response used an undeclared tool without a recorded failure")
+            call_loss = all(flags.get(use["id"], {}).get("relevant", True) for use in uses)
             sample = copy.deepcopy(call["request"])
             if runtime == "codex":
                 context = sample.get("input")
@@ -388,11 +298,16 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
                 sample["output"] = copy.deepcopy(response["output"])
                 sample["input_loss_mask"] = [False] * (len(context) if isinstance(context, list) else 1)
                 sample["target_output_loss_mask"] = [
-                    not item.get("type", "").endswith("_output")
-                    and not (item.get("type") == "reasoning" and (item.get("encrypted_content")
-                              or not (item.get("content") or item.get("summary"))))
+                    (flags.get(item.get("call_id"), {}).get("relevant", call_loss)
+                     if item.get("type") in {"function_call", "custom_tool_call", "shell_call"} else call_loss)
+                    and not item.get("type", "").endswith("_output")
+                    and not (item.get("type") == "reasoning" and not (item.get("content") or item.get("summary")))
                     for item in response["output"]
                 ]
+                sample["target_reasoning_text_fields"] = {
+                    str(index): {"content": bool(item.get("content")), "summary": bool(item.get("summary")),
+                                 "encrypted_content": False}
+                    for index, item in enumerate(response["output"]) if item.get("type") == "reasoning"}
                 sample["response_metadata"] = {key: value for key, value in response.items() if key != "output"}
                 if response.get("id"):
                     response_ids.add(response["id"])
@@ -402,7 +317,10 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
                     raise TrajectoryError("native chat request has no messages")
                 sample["messages"].append(copy.deepcopy(response["choices"][0]["message"]))
                 sample["target_message_index"] = len(context) - 1
-                sample["loss_mask"] = [False] * (len(context) - 1) + [True]
+                tool_mask = {use["id"]: flags.get(use["id"], {}).get("relevant", True) for use in uses}
+                sample["loss_mask"] = [False] * (len(context) - 1) + [bool(call_loss or any(tool_mask.values()))]
+                sample["target_text_loss"] = call_loss
+                sample["target_tool_call_loss_mask"] = tool_mask
                 sample["response_metadata"] = {key: value for key, value in response.items() if key != "choices"}
                 sample["response_metadata"]["choice"] = {key: value for key, value in response["choices"][0].items() if key != "message"}
             if call["call_id"] == snapshot["final_call_id"]:
@@ -415,6 +333,8 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
             origins.append({"sample_index": len(origins), "call_id": call["call_id"], "source": call["source"],
                             "response_file": call["response_file"],
                             "read_bindings": [item for item in snapshot.get("read_bindings", []) if item["call_id"] == call["call_id"]]})
+            if final_seen:
+                break
         stream.flush()
         os.fsync(stream.fileno())
     if not origins or not final_seen:

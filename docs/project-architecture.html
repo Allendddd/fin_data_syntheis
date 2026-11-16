@@ -88,7 +88,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 </tbody></table></div>
 <div class="grid">
 <div class="card"><span class="tag rule">QUERY</span><h3>先交付可验证的问题</h3><p><code>validation + retrieval_index → query_export</code>。模型输入为纯 query，隐藏校验与快照由外部使用者单独加载。教师合成失败时，已经完成的 query 分片仍可使用。</p><p class="muted">只生成 query：关闭 <code>training.enabled</code> 与 <code>atomic.enabled</code>，保留 <code>query_export.enabled</code>。</p></div>
-<div class="card"><span class="tag optional">TEACHER SFT</span><h3>按需交付实际执行轨迹</h3><p><code>validation + retrieval_index → sft_prepare</code>。长程教师通过金融或框架原生工具取得证据，证明通过校验后进入对应格式的样本文件。原子教师使用独立生成与审核路径。</p><p class="muted">两条分支独立产出；最终 export 等待所有已启用分支完成。</p></div>
+<div class="card"><span class="tag optional">TEACHER SFT</span><h3>按需交付实际执行轨迹</h3><p><code>validation + retrieval_index → sft_prepare</code>。长程教师通过金融或框架原生工具取得证据，证明通过校验后进入对应格式的样本文件。原子教师生成自然语言和可见 CoT，经内容审核及 judge 择优；已审核参考 r 作为独立来源参与 SFT。</p><p class="muted">两条分支独立产出；最终 export 等待所有已启用分支完成。</p></div>
 </div>
 </section>
 
@@ -108,9 +108,9 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <span class="arrow" aria-hidden="true">→</span>
 <div class="node"><h4>HarnessSession.step()</h4><p>search_corpus / open_chunk / calculate；更新步骤、工具预算、证据账本、工作记忆与可见观察。</p></div>
 <span class="arrow" aria-hidden="true">→</span>
-<div class="node output"><h4>最终提交与私有校验</h4><p>金融模式的 submit_final(proof) 转为 final 动作；检查引用、计算与答案，合格后输出统一金融 SFT。</p></div>
+<div class="node output"><h4>最终提交与私有校验</h4><p>金融模式的 submit_final(answer) 转为 final 动作；检查引用、计算与答案，合格后输出统一金融 SFT。</p></div>
 </div></div>
-<div class="callout"><strong>原生工具模式：普通语料文件 → 框架工具执行 → 正常最终答复 → 离线审核。</strong><p>Strands、Codex、CC 的 native 模式不创建金融 bridge / session / MCP，不注册 submit_final；保留各自原生工具和默认 system。采集器给出问题、冻结语料目录与 proof 格式，随后核对实际读取、文件完整性和最终证明。项目的 <code>default: native</code> JSON runtime 与这三个框架的 <code>mode: native</code> 含义不同。</p></div>
+<div class="callout"><strong>原生工具模式：普通语料文件 → 框架工具执行 → 正常最终答复 → 离线审核。</strong><p>Strands、Codex、CC 的 native 模式不创建金融 bridge / session / MCP，不注册 submit_final；保留各自原生工具和默认 system。采集器给出问题、冻结语料目录与自然语言解答要求，随后核对实际读取、文件完整性和最终证明。项目的 <code>default: native</code> JSON runtime 与这三个框架的 <code>mode: native</code> 含义不同。</p></div>
 <div class="table-wrap"><table><thead><tr><th>Runtime</th><th>模型协议</th><th>接入实现</th><th>上下文与采样</th></tr></thead><tbody>
 <tr><td>native</td><td>OpenAI Chat Completions，JSON 动作</td><td><a href="../src/mint_synth/sft/rollout.py">sft/rollout.py</a></td><td>项目可见状态打包；角色 temperature/max_tokens；角色缓存按配置生效。</td></tr>
 <tr><td>strands</td><td>OpenAI Chat Completions，工具调用</td><td><a href="../src/mint_synth/agents/strands_runtime.py">agents/strands_runtime.py</a></td><td>裸 SDK Agent 与自身消息历史；角色 temperature/max_tokens；不复用 native JSON 请求缓存。</td></tr>
@@ -136,7 +136,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <div class="grid three" style="margin-top:18px">
 <div class="card"><div class="number">L1 · MODEL</div><h3>模型协议层</h3><p>保存实际 prompt、工具定义、采样字段和服务返回的文本/工具调用/SSE。服务返回哪些 token、logprob 或 reasoning 字段，就保留哪些字段。</p><p><code>model/run.json</code><br><code>model/calls/*</code></p><p class="muted">不会从文本反推 token IDs，也不生成服务未返回的内部推理内容。</p></div>
 <div class="card"><div class="number">L2 · RUNTIME</div><h3>框架执行层</h3><p>Strands 保存 SDK 回调与消息历史；Codex/CC 保存 JSONL/stream-json 和诊断，可解释调用次序、框架状态与失败位置。</p><p><code>agent.events.jsonl</code><br><code>agent.messages.json</code><br>或 <code>stdout.jsonl / stderr.log / cli.json</code></p></div>
-<div class="card"><div class="number">L3 · ENVIRONMENT</div><h3>证据与校验层</h3><p>金融模式保留动作、观察与账本；原生模式保留语料完整性、原生读取绑定和离线 verdict。最终证明必须与来源及隐藏图一致。</p><p><code>environment.json / result.json</code><br><code>native-workspace.json / native-audit.json</code></p><p class="muted">隐藏答案与校验结论不进入模型输入。</p></div>
+<div class="card"><div class="number">L3 · ENVIRONMENT</div><h3>证据与校验层</h3><p>金融模式保留动作、观察与账本；原生模式保留语料完整性、原生读取绑定和离线 verdict。实际解答经私有语义审核和候选运算回放，证据来自真实观察；接受等价路径，错误、重复及无贡献动作按轮次屏蔽监督。</p><p><code>environment.json / result.json</code><br><code>native-workspace.json / native-audit.json</code></p><p class="muted">隐藏答案与校验结论不进入模型输入。</p></div>
 </div>
 <div class="callout"><strong>统一金融样本与原生协议样本分别发布。</strong><p>金融 long messages 绑定模型实际文本、调用与环境结果；原生模式按每次真实请求导出 Codex Responses items、Strands Chat Completions messages 或 CC Anthropic 内容块，保留工具原名和 schema。项目 native 的完整请求与响应 JSON 在 <code>model/calls</code>，可来自完整响应缓存；<code>model.parsed.json</code> 仅为兼容摘要。</p></div>
 <p>每次长程尝试都写轨迹引用，包括失败和超时。外部 runtime 停止后检查采集代理是否空闲，再冻结记录，避免迟到流式响应修改已发布文件。原始轨迹可能包含完整来源内容，HTTP 凭据头脱敏不等于正文通用脱敏。</p>
@@ -148,7 +148,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <div class="table-wrap"><table><thead><tr><th>模块</th><th>工程职责</th><th>关键实现</th></tr></thead><tbody>
 <tr><td><code>core</code></td><td>配置、运行布局、原子提交、签名与指纹。</td><td><a href="../src/mint_synth/core/config_v2.py">config_v2.py</a> · <a href="../src/mint_synth/core/run_state.py">run_state.py</a> · <a href="../src/mint_synth/core/provenance.py">provenance.py</a></td></tr>
 <tr><td><code>storage</code></td><td>扫描输入、读取 JSONL/Parquet、规范记录、切块。</td><td><a href="../src/mint_synth/storage/catalog.py">catalog.py</a> · <a href="../src/mint_synth/storage/records.py">records.py</a> · <a href="../src/mint_synth/storage/chunking.py">chunking.py</a></td></tr>
-<tr><td><code>inference</code></td><td>模型角色、JSON 请求、重试、线程并发与持久化响应缓存。</td><td><a href="../src/mint_synth/inference/runtime.py">runtime.py</a> · <a href="../src/mint_synth/inference/llm.py">llm.py</a> · <a href="../src/mint_synth/inference/prompts.py">prompts.py</a></td></tr>
+<tr><td><code>inference</code></td><td>模型角色、文本/JSON 请求、重试、线程并发与持久化响应缓存。</td><td><a href="../src/mint_synth/inference/runtime.py">runtime.py</a> · <a href="../src/mint_synth/inference/llm.py">llm.py</a> · <a href="../src/mint_synth/inference/prompts.py">prompts.py</a></td></tr>
 <tr><td><code>synthesis</code></td><td>事实、实体、公式 DAG、种子约束、原子/长程题目、重放、审核与去污染。</td><td><a href="../src/mint_synth/synthesis/dag.py">dag.py</a> · <a href="../src/mint_synth/synthesis/long_horizon.py">long_horizon.py</a> · <a href="../src/mint_synth/synthesis/seed_constraints.py">seed_constraints.py</a> · <a href="../src/mint_synth/synthesis/audit.py">audit.py</a></td></tr>
 <tr><td><code>harness</code></td><td>快照、工具注册、公开 observe/step、会话账本与私有证明校验。</td><td><a href="../src/mint_synth/harness/snapshot.py">snapshot.py</a> · <a href="../src/mint_synth/harness/session.py">session.py</a> · <a href="../src/mint_synth/harness/verifier.py">verifier.py</a></td></tr>
 <tr><td><code>agents</code></td><td>runtime 参数、环境桥、MCP、Strands/CLI 适配与原始采集。</td><td><a href="../src/mint_synth/agents/collector.py">collector.py</a> · <a href="../src/mint_synth/agents/bridge.py">bridge.py</a> · <a href="../src/mint_synth/agents/mcp_server.py">mcp_server.py</a></td></tr>
@@ -185,7 +185,7 @@ bash scripts/submit_slurm.sh /shared/outputs/runs/&lt;run_id&gt; \
 <h2>07 / 可恢复与可追溯：冻结、缓存、提交、发布</h2>
 <div class="grid">
 <div class="card"><div class="number">01 · FREEZE</div><h3>冻结输入与实现版本</h3><p><code>plan.json</code> 记录输入目录、配置、代码与辅助指纹；公式、种子、别名、评测题与自定义工具资源一并校验。</p><p>分片签名包含阶段、分片 ID、normalize 输入分配及上游聚合签名，计划本身有完整性指纹。</p></div>
-<div class="card"><div class="number">02 · REQUEST CACHE</div><h3>重用角色 JSON 请求</h3><p>SQLite 缓存按 run/stage/shard/model role 隔离；键包含角色命名空间、system/user、采样参数与 sample_key。immutable 保留首次写入，refresh 重新请求。</p><p>缓存服务于项目角色客户端和 native 教师；外部 SDK/CLI 的 HTTP 采集本身不提供响应缓存。</p></div>
+<div class="card"><div class="number">02 · REQUEST CACHE</div><h3>重用角色文本与 JSON 请求</h3><p>SQLite 缓存按 run/stage/shard/model role 隔离；键包含角色命名空间、system/user、采样参数与 sample_key；文本另有模式和版本，不复用旧 proof 缓存。immutable 保留首次写入，refresh 重新请求。</p><p>缓存服务于项目角色客户端和 native 教师；外部 SDK/CLI 的 HTTP 采集本身不提供响应缓存。</p></div>
 <div class="card"><div class="number">03 · COMMIT</div><h3>原子提交已完成分片</h3><p>worker 验证计划和上游，写临时目录后提交 <code>_SUCCESS.json</code>。失败保留记录，不完整分片可隔离重做。</p><p>同一 run 的运行锁阻止并发 runner 写入；恢复时校验签名和产物完整性，再复用完成分片。</p></div>
 <div class="card"><div class="number">04 · PUBLISH</div><h3>质量门槛之后发布</h3><p>检查无效记录率、ID 冲突率、LLM 终态错误率、验证拒绝率与最小数量，确认启用的 query/SFT 交付门槛。</p><p>文件清单核验后写 <code>exports/manifest.json</code> 和 <code>_PUBLISHED.json</code>；已提交 export 可用于恢复发布标记。</p></div>
 </div>

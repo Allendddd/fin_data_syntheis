@@ -32,12 +32,13 @@ def _tool(name: str, arguments: Any, field: str, allowed: set[str]) -> dict[str,
             break
     arguments = _arguments(arguments)
     if name == "submit_final":
-        if set(arguments) != {"proof"} or not isinstance(arguments["proof"], dict):
-            raise TrajectoryError("model final submission has invalid arguments")
-        return {"kind": "final", "proof": arguments["proof"], "field": field}
-    if name not in allowed:
-        raise TrajectoryError(f"model invoked an unsupported financial tool: {name}")
-    return {"kind": "tool_call", "name": name, "arguments": arguments, "field": field}
+        if set(arguments) == {"answer"} and isinstance(arguments["answer"], str):
+            return {"kind": "final", "text": arguments["answer"], "field": field}
+        if set(arguments) == {"proof"} and isinstance(arguments["proof"], dict):
+            return {"kind": "final", "proof": arguments["proof"], "field": field}
+        raise TrajectoryError("model final submission has invalid arguments")
+    return {"kind": "tool_call", "name": name, "arguments": arguments, "field": field,
+            "known_tool": name in allowed}
 
 
 def _text(kind: str, value: Any, field: str) -> list[dict[str, Any]]:
@@ -72,7 +73,9 @@ def response_parts(body: dict[str, Any], protocol: str, allowed: set[str]) -> li
             if call.get("type", "function") != "function":
                 raise TrajectoryError("unsupported Chat Completions tool call")
             function = call["function"]
-            parts.append(_tool(function["name"], function["arguments"], f"choices[0].message.tool_calls[{index}]", allowed))
+            part = _tool(function["name"], function["arguments"], f"choices[0].message.tool_calls[{index}]", allowed)
+            part["tool_call_id"] = call.get("id")
+            parts.append(part)
     elif protocol == "responses":
         if body.get("status", "completed") != "completed":
             raise TrajectoryError("Responses result is incomplete")
@@ -95,7 +98,9 @@ def response_parts(body: dict[str, Any], protocol: str, allowed: set[str]) -> li
             elif kind in {"function_call", "mcp_call"}:
                 if kind == "mcp_call" and item.get("server_label") != "finance":
                     raise TrajectoryError("Responses MCP call is outside the finance tool set")
-                parts.append(_tool(item["name"], item["arguments"], field, allowed))
+                part = _tool(item["name"], item["arguments"], field, allowed)
+                part["tool_call_id"] = item.get("call_id", item.get("id"))
+                parts.append(part)
             elif kind not in {"compaction", "mcp_list_tools"}:
                 raise TrajectoryError(f"unsupported Responses output item: {kind}")
     elif protocol == "anthropic":
@@ -109,7 +114,9 @@ def response_parts(body: dict[str, Any], protocol: str, allowed: set[str]) -> li
             elif kind == "thinking":
                 parts.extend(_text("reasoning", block.get("thinking"), field + ".thinking"))
             elif kind == "tool_use":
-                parts.append(_tool(block["name"], block["input"], field, allowed))
+                part = _tool(block["name"], block["input"], field, allowed)
+                part["tool_call_id"] = block.get("id")
+                parts.append(part)
             elif kind != "redacted_thinking":
                 raise TrajectoryError(f"unsupported Anthropic content block: {kind}")
     else:
@@ -166,14 +173,15 @@ def streamed_parts(text: str, protocol: str, allowed: set[str]) -> list[dict[str
                 index = call["index"]
                 if index not in calls:
                     calls[index] = {"kind": "pending_tool", "name": "", "arguments": "",
-                                    "field": f"SSE.delta.tool_calls[{index}]"}
+                                    "field": f"SSE.delta.tool_calls[{index}]", "tool_call_id": None}
                     parts.append(calls[index])
                 function = call.get("function", {})
                 calls[index]["name"] += function.get("name") or ""
+                calls[index]["tool_call_id"] = call.get("id") or calls[index]["tool_call_id"]
                 calls[index]["arguments"] += function.get("arguments") or ""
         if not done or finish not in {"stop", "tool_calls", "function_call"}:
             raise TrajectoryError("Chat Completions stream has no successful terminal event")
-        return [_tool(part["name"], part["arguments"], part["field"], allowed)
+        return [{**_tool(part["name"], part["arguments"], part["field"], allowed), "tool_call_id": part["tool_call_id"]}
                 if part["kind"] == "pending_tool" else part for part in parts]
     if protocol == "responses":
         response = None
@@ -287,12 +295,35 @@ def iter_captured_calls(trace_dir: Path) -> Iterator[dict[str, Any]]:
 
 def load_model_turns(trace_dir: Path, allowed: set[str]) -> list[dict[str, Any]]:
     turns = []
-    for call in iter_captured_calls(trace_dir):
+    failures = {}
+    for position, call in enumerate(iter_captured_calls(trace_dir)):
+        request = call["request"]
+        for index, message in enumerate(request.get("messages", [])):
+            if message.get("role") == "tool":
+                failures.setdefault(message.get("tool_call_id"), (message.get("content"), call["source"], f"request.messages[{index}].content", position))
+            elif isinstance(message.get("content"), list):
+                for block_index, block in enumerate(message["content"]):
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                        failures.setdefault(block.get("tool_use_id"), (block, call["source"], f"request.messages[{index}].content[{block_index}]", position))
+        for index, item in enumerate(request.get("input", []) if isinstance(request.get("input"), list) else []):
+            if item.get("type") == "function_call_output":
+                failures.setdefault(item.get("call_id"), (item.get("output"), call["source"], f"request.input[{index}].output", position))
         text, protocol = call["response_text"], call["protocol"]
         parts = streamed_parts(text, protocol, allowed) if call["streaming"] else response_parts(json.loads(text), protocol, allowed)
         turns.append({key: call[key] for key in ("call_id", "source", "response_file", "protocol")})
-        turns[-1].update(assistant_parts=parts, cache_hit=False,
+        turns[-1].update(assistant_parts=parts, cache_hit=False, capture_position=position,
                          request_messages_field=next((key for key in ("messages", "input") if key in call["request"]), None))
     if not turns:
         raise TrajectoryError("no complete model exchanges were captured; tool-only export is disabled")
+    from .native_audit import _failed_result
+
+    final_position = next((turn["capture_position"] for turn in turns
+                           if any(part["kind"] == "final" for part in turn["assistant_parts"])), len(turns))
+    for turn in turns:
+        for part in turn["assistant_parts"]:
+            if part.get("kind") == "tool_call" and part.get("known_tool") is False:
+                failure = failures.get(part.get("tool_call_id"))
+                if (failure is not None and turn["capture_position"] < failure[3] <= final_position
+                        and _failed_result(failure[0])):
+                    part.update(failed_observation=failure[0], observation_source=failure[1], observation_field=failure[2])
     return turns
