@@ -12,6 +12,7 @@ import json
 import zlib
 from pathlib import Path
 from typing import Any
+from collections.abc import Iterator
 
 from .trajectory import TrajectoryError
 
@@ -238,7 +239,8 @@ def streamed_parts(text: str, protocol: str, allowed: set[str]) -> list[dict[str
     raise TrajectoryError("unsupported streaming model protocol")
 
 
-def load_model_turns(trace_dir: Path, allowed: set[str]) -> list[dict[str, Any]]:
+def iter_captured_calls(trace_dir: Path) -> Iterator[dict[str, Any]]:
+    """Yield verified raw payloads without changing tool names or schemas."""
     calls = trace_dir / "model" / "calls"
     records = []
     for path in calls.glob("*.json"):
@@ -249,7 +251,6 @@ def load_model_turns(trace_dir: Path, allowed: set[str]) -> list[dict[str, Any]]
         if protocol is None:
             continue  # e.g. a CLI's GET /models probe; the raw record is retained.
         records.append((metadata.get("started_at", ""), path, metadata, protocol))
-    turns = []
     for _, path, metadata, protocol in sorted(records, key=lambda row: row[0]):
         response = metadata.get("response", {})
         status = response.get("status", 0)
@@ -279,11 +280,19 @@ def load_model_turns(trace_dir: Path, allowed: set[str]) -> list[dict[str, Any]]
             raise TrajectoryError(f"unsupported model capture encoding: {encoding}")
         text = raw.decode("utf-8")
         streaming = "text/event-stream" in headers.get("content-type", "") or text.lstrip().startswith(("data:", "event:"))
-        parts = streamed_parts(text, protocol, allowed) if streaming else response_parts(json.loads(text), protocol, allowed)
-        turns.append({"call_id": metadata["call_id"], "source": path.relative_to(trace_dir).as_posix(),
-                      "response_file": (path.parent / response["body_file"]).relative_to(trace_dir).as_posix(),
-                      "protocol": protocol, "assistant_parts": parts, "cache_hit": False,
-                      "request_messages_field": next((key for key in ("messages", "input") if key in request), None)})
+        yield {"call_id": metadata["call_id"], "source": path.relative_to(trace_dir).as_posix(),
+               "response_file": (path.parent / response["body_file"]).relative_to(trace_dir).as_posix(),
+               "protocol": protocol, "request": request, "response_text": text, "streaming": streaming}
+
+
+def load_model_turns(trace_dir: Path, allowed: set[str]) -> list[dict[str, Any]]:
+    turns = []
+    for call in iter_captured_calls(trace_dir):
+        text, protocol = call["response_text"], call["protocol"]
+        parts = streamed_parts(text, protocol, allowed) if call["streaming"] else response_parts(json.loads(text), protocol, allowed)
+        turns.append({key: call[key] for key in ("call_id", "source", "response_file", "protocol")})
+        turns[-1].update(assistant_parts=parts, cache_hit=False,
+                         request_messages_field=next((key for key in ("messages", "input") if key in call["request"]), None))
     if not turns:
         raise TrajectoryError("no complete model exchanges were captured; tool-only export is disabled")
     return turns

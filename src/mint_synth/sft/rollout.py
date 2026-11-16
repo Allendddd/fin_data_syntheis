@@ -23,7 +23,8 @@ def long_rollout(
             raise ValueError("external teacher runtimes require model settings and a trace directory")
         from mint_synth.agents.collector import collect_runtime
 
-        return collect_runtime(task, index_path, config, registry or default_tool_registry(),
+        tools = registry if runtime.native_tools else registry or default_tool_registry()
+        return collect_runtime(task, index_path, config, tools,
                                model=model, runtime=runtime, trace_dir=trace_dir, sample_key=sample_key)
     try:
         sample, reason = _native_rollout(task, client, index_path, config, registry,

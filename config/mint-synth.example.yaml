@@ -79,6 +79,16 @@ training:
     by_role: {}                  # e.g. {teacher: strands}; roles may use different runtimes
     commands: {}                 # e.g. {codex: [/opt/codex/bin/codex], claude_code: [/opt/bin/claude]}
     timeout_seconds: 600
+    codex:
+      mode: finance             # native enables Codex built-in tools with corpus files and offline grading, without MCP
+      sandbox: workspace-write  # native mode: workspace-write | read-only
+    strands:
+      mode: finance             # native uses the official strands_tools package, without financial tool wrappers
+      tools: [file_read, shell]  # native only; optional file_write / python_repl
+    claude_code:
+      mode: finance             # finance | native; native uses ONLY CC built-ins, corpus files and offline grading, without MCP
+      tools: [default]          # native mode only; [] disables built-in tools
+      allowed_tools: []        # native mode only; e.g. [Read, "Bash(rg *)", "Bash(cat *)", "Bash(python3 *)"]
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000

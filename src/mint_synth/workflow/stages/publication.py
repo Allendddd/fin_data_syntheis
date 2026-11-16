@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mint_synth.agents.native_capture import NATIVE_FORMATS
+
 from collections import defaultdict
 import json
 import os
@@ -127,14 +129,23 @@ def stage_export(
         }
         sidecar = (root / "audit-sidecar.jsonl").open("w", encoding="utf-8", newline="\n")
         trajectories = (root / "trajectory-index.jsonl").open("w", encoding="utf-8", newline="\n")
+        native_trajectories = {family: {"train": set(), "val": set()} for family in NATIVE_FORMATS.values()}
         try:
             for prepared_shard in range(prepared_count):
                 prepared = layout.shard("sft_prepare", prepared_shard)
-                for family in ("atomic", "long"):
-                    with (prepared / f"{family}.jsonl").open("r", encoding="utf-8") as source:
+                for family in ("atomic", "long", *NATIVE_FORMATS.values()):
+                    prepared_file = prepared / f"{family}.jsonl"
+                    if family in native_trajectories and not prepared_file.is_file():
+                        continue
+                    with prepared_file.open("r", encoding="utf-8") as source:
                         for line in source:
                             sample = json.loads(line)
                             split = sample.pop("_split")
+                            if family in native_trajectories:
+                                if (family, split) not in streams:
+                                    for native_split in ("train", "val"):
+                                        streams[(family, native_split)] = (root / f"{family}-{native_split}.jsonl").open("w", encoding="utf-8", newline="\n")
+                                native_trajectories[family][split].add(sample["trajectory_id"])
                             streams[(family, split)].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                             sft_counts[family] += 1
                             sft_counts[f"{family}_{split}"] += 1
@@ -165,10 +176,22 @@ def stage_export(
         ):
             required = max(1, int(config["training"][minimum_key]))
             available = sft_counts[f"{family}_train"]
+            if family == "long":
+                available += len(set().union(*(splits["train"] for splits in native_trajectories.values())))
             if config["training"][enabled_key] and available < required:
                 raise RuntimeError(f"SFT publication blocked: {family} has {available} accepted training samples; requires {required}")
-        atomic_json(root / "manifest.json", {"format": "ms-swift messages", "counts": dict(sft_counts),
-                    "trajectory_format": "teacher_interactions_v2",
+        has_native = any(ids for splits in native_trajectories.values() for ids in splits.values())
+        for native_family, splits in native_trajectories.items():
+            if any(splits.values()):
+                for native_split, ids in splits.items():
+                    sft_counts[f"{native_family.replace('-', '_')}_{native_split}_trajectories"] = len(ids)
+        sft_formats = {"atomic": "ms-swift messages", "long": "ms-swift messages"}
+        for sample_format, native_family in NATIVE_FORMATS.items():
+            if any(native_trajectories[native_family].values()):
+                sft_formats[native_family] = sample_format
+        atomic_json(root / "manifest.json", {"format": "mixed" if has_native else "ms-swift messages", "formats": sft_formats,
+                    "counts": dict(sft_counts),
+                    "trajectory_format": "mixed" if has_native else "teacher_interactions_v2",
                     "reasoning_format": config["training"].get("reasoning_format", "plain"),
                     "tool_observations_loss": False, "audit_sidecar": "audit-sidecar.jsonl",
                     "trajectory_index": "trajectory-index.jsonl"})

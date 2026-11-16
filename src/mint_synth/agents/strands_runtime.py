@@ -97,6 +97,9 @@ async def _daemon_call(function: Callable, *args: Any) -> Any:
 
 
 def run_strands(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path) -> RuntimeResult:
+    if getattr(getattr(settings, "strands", None), "mode", "finance") == "native":
+        from .strands_native import run_strands_native
+        return run_strands_native(bridge, model, settings, trace_dir)
     recorder = _Recorder(Path(trace_dir))
     shared: dict[str, Any] = {"messages": [], "submitted_final": False, "environment_done": False}
     completed = threading.Event()

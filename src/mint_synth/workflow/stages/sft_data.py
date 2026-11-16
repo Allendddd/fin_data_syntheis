@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from mint_synth.core.run_state import RunLayout
 from mint_synth.agents.base import settings_for_role
+from mint_synth.agents.native_capture import NATIVE_FORMATS
 from mint_synth.harness.registry import load_tool_registry
 from mint_synth.inference.runtime import bounded_map
 from mint_synth.sft.atomic_teacher import sample_atomic
@@ -37,7 +38,8 @@ def stage_sft_prepare(
     agent_settings = {role: settings_for_role(config, role) for role in long_roles}
     json_roles = [*atomic_roles, *(role for role in long_roles if agent_settings[role][1].name == "native")]
     clients = {role: _role_client(layout, config, "sft_prepare", shard_id, role) for role in dict.fromkeys(json_roles)}
-    registry = load_tool_registry(config.get("harness", {}).get("tool_registry")) if long_roles else None
+    needs_finance = any(not settings.native_tools for _model, settings in agent_settings.values())
+    registry = load_tool_registry(config.get("harness", {}).get("tool_registry")) if needs_finance else None
     if long_roles:
         traces = output / "traces"
         traces.mkdir(mode=0o700, exist_ok=True)
@@ -46,7 +48,7 @@ def stage_sft_prepare(
     counts: dict[str, int] = defaultdict(int)
     streams = {
         name: (output / f"{name}.jsonl").open("w", encoding="utf-8", newline="\n")
-        for name in ("atomic", "long", "sidecar", "rejected", "trajectories")
+        for name in ("atomic", "long", *NATIVE_FORMATS.values(), "sidecar", "rejected", "trajectories")
     }
 
     def selected_tasks():
@@ -82,6 +84,9 @@ def stage_sft_prepare(
                     trace_ref = "traces/" + hashlib.sha256(sample_key.encode()).hexdigest()[:32]
                     candidate = {"role": role, "attempt": attempt + 1, "runtime": runtime.name,
                                  "model": model.model, "trace": trace_ref, "accepted": False, "reason": "rollout failed"}
+                    if runtime.name == "claude_code":
+                        candidate["claude_code_mode"] = runtime.claude_code.mode
+                    candidate["tool_mode"] = runtime.tool_mode
                     teacher_audit["candidates"].append(candidate)
                     sample, reason = long_rollout(
                         task, clients.get(role), index_path, config, registry, sample_key=sample_key,
@@ -90,6 +95,7 @@ def stage_sft_prepare(
                     candidate.update(accepted=sample is not None, reason=reason)
                     if sample is not None:
                         candidate["trajectory_id"] = sample["trajectory_id"]
+                        candidate["sample_format"] = sample.get("sample_format", "ms-swift messages")
                     if sample is not None:
                         teacher_audit["selected"] = {"source": "teacher", "role": role,
                                                      "runtime": runtime.name,
@@ -117,14 +123,39 @@ def stage_sft_prepare(
                     streams["rejected"].write(json.dumps({"task_id": task_id, "reason": reason,
                                                           "teacher_audit": teacher_audit}, ensure_ascii=False) + "\n")
                     continue
-                sample["messages"][0]["loss"] = False
-                sample["messages"][1]["loss"] = False
                 split = split_for_task(task_id, float(config["training"]["split_validation_fraction"]))
-                sample["_split"] = split
-                streams[family].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+                native_family = NATIVE_FORMATS.get(sample.get("sample_format"))
+                if native_family:
+                    sample_path = Path(sample["sample_file"]).resolve()
+                    if not sample_path.is_relative_to((output / "traces").resolve()):
+                        raise ValueError("native sample file must be inside this shard's trace directory")
+                    target = streams[native_family]
+                    offset, requests = target.tell(), 0
+                    try:
+                        with sample_path.open("r", encoding="utf-8") as source:
+                            for line in source:
+                                row = json.loads(line)
+                                if row.get("trajectory_id") != sample["trajectory_id"] or row.get("sample_format") != sample["sample_format"]:
+                                    raise ValueError("native sample binding mismatch")
+                                row["_split"] = split
+                                target.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                                requests += 1
+                        if requests != sample["sample_count"]:
+                            raise ValueError("native sample count mismatch")
+                    except Exception:
+                        target.seek(offset)
+                        target.truncate()
+                        raise
+                    counts[native_family.replace("-", "_") + "_requests"] += requests
+                else:
+                    sample["messages"][0]["loss"] = False
+                    sample["messages"][1]["loss"] = False
+                    sample["_split"] = split
+                    streams[family].write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
                 sidecar = {
                     "task_id": task_id, "task_type": task["task_type"], "split": split,
                     "trajectory_id": sample.get("trajectory_id"),
+                    "sample_format": sample.get("sample_format", "ms-swift messages"),
                     "capability": task.get("capability"), "financial_topic": financial_topic(task),
                     "objective_type": task.get("task_spec", {}).get("objective_type"),
                     "formula_id": task.get("formula_id"), "seed_id": task.get("seed", {}).get("seed_id"),

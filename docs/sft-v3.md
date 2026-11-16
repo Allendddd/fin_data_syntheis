@@ -26,9 +26,15 @@
 
 `sft_prepare` 在每个分片内以 `llm.concurrency_per_worker` 为上限并发处理任务，输出顺序保持与验证任务一致。整个本地运行的模型请求上限约为 `mint-synth run --workers` 与该值的乘积；实际吞吐还取决于服务端限流和长任务每条轨迹的顺序工具调用。各分片 `_SUCCESS.json` 的 `metrics.processing_seconds` 记录处理耗时，可结合候选数、接纳数和 LLM 用量计算吞吐；先用小规模样本观察这些指标，再提高并发与采样次数。
 
-长任务的 `long_teacher_roles` 默认空列表，此时沿用旧字段 `teacher_role`；非空时按 `rollouts_per_task` 次尝试轮换角色。教师只获得 query、截止日和默认的 `search_corpus`、`open_chunk`、`calculate` 工具；可通过 `harness.tool_registry` 扩展。模型必须先搜索再打开证据块。教师轨迹与外部 OPD 使用同一 [Harness 会话](harness.md)：必须将已取得证据绑定到最终证明中的事实，并完整表达必要运算，答案和单位与隐藏图一致且动作有效，轨迹才被接纳。每次最多 `max_tool_steps` 次工具调用，并另有一次最终提交机会。无关工具调用被屏蔽损失，工具观察不参与损失。
+长任务的 `long_teacher_roles` 默认空列表，此时沿用旧字段 `teacher_role`；非空时按 `rollouts_per_task` 次尝试轮换角色。默认金融模式下，教师只获得 query、截止日和默认的 `search_corpus`、`open_chunk`、`calculate` 工具；可通过 `harness.tool_registry` 扩展。模型必须先搜索再打开证据块。该模式与外部 OPD 使用同一 [Harness 会话](harness.md)：必须将已取得证据绑定到最终证明中的事实，并完整表达必要运算，答案和单位与隐藏图一致且动作有效，轨迹才被接纳。每次最多 `max_tool_steps` 次工具调用，并另有一次最终提交机会。按规则识别的无关工具调用屏蔽损失，工具观察不参与损失。
 
 发布目录 `stages/export/shards/000000/sft/` 包含 `atomic-train.jsonl`、`atomic-val.jsonl`、`long-train.jsonl`、`long-val.jsonl`。每行是 ms-swift `messages` 数据；长任务另有 JSON 字符串 `tools`，包含 `tool_call` 和 `tool_response` 消息。`audit-sidecar.jsonl` 按任务保存标签、答案、种子、公式、证据，以及教师候选来源、拒绝理由和选择依据；这些字段不进入模型可见消息。划分由任务 ID 的哈希确定。
+
+Strands、Codex、Claude Code 还可分别选择 `training.agent_runtime.strands.mode: native`、`codex.mode: native`、`claude_code.mode: native`。这是框架原生工具模式，与项目自有 JSON runtime `default: native` 不同。三者使用框架自带工具或官方工具包，冻结语料以普通文件提供，不注入金融 MCP、金融工具或 `submit_final`；正常最终回复中的 proof 经真实来源读取核对和隐藏图离线校验后才接纳。`max_tool_steps` / `max_context_chars` 不控制原生 loop，执行期限由 `agent_runtime.timeout_seconds` 控制。
+
+原生轨迹按实际模型请求写入独立文件，不混入上述 ms-swift 数据：CC 使用 `cc-native-{train,val}.jsonl` / `claude_code_native_v1`，保留 Anthropic system 与内容块；Codex 使用 `codex-native-{train,val}.jsonl` / `codex_native_v1`，保留 Responses `input`、工具和完整 `output`；Strands 使用 `strands-native-{train,val}.jsonl` / `strands_native_v1`，保留 Chat Completions 请求和实际 assistant message。原始工具名、调用 ID、schema 与该次上下文均保留。字段及监督范围见 [原生工具模式](teacher-runtimes.md#三种框架的原生工具模式)、[CC 契约](teacher-runtimes.md#原生-cc-训练数据契约) 和 [Codex / Strands 契约](teacher-runtimes.md#codex-与-strands-原生训练数据契约)。
+
+同一任务的所有原生请求属于同一 split；`sample_count` 是请求数，最低长轨迹门槛仍按合格完整轨迹数计，不能用一条轨迹的多个请求放大样本门槛。原生协议文件需要训练端按学生模板适配，不能直接视为统一金融 messages。
 
 长任务样本结构示意：
 

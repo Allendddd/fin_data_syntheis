@@ -1,13 +1,13 @@
-"""Run existing agent CLIs against the private finance MCP bridge.
+"""Run agent CLIs with either finance MCP or their built-in tools.
 
 The CLIs own their agent loops. Their native JSONL streams and model HTTP calls
-are retained independently; the environment's final submission decides whether
-the financial task finished. CLI feature switches are defense in depth, not an
-operating-system isolation boundary.
+are retained independently. Native runs are graded offline from native reads
+and the ordinary final reply. CLI switches are not OS-level isolation.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -16,18 +16,22 @@ import signal
 import subprocess
 import tempfile
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from mint_synth.core.run_state import atomic_json
 
-from .base import ModelSettings, RuntimeResult, RuntimeSettings
+from .base import ClaudeCodeSettings, CodexSettings, ModelSettings, RuntimeResult, RuntimeSettings
 from .mcp_server import FinanceMCPServer
+from .cc_workspace import finish_workspace, native_final_reply, prepare_workspace
+from .codex_events import native_final_reply as codex_final_reply
 
 
 _SECRET_ENV = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.I)
 _CODEX_ITEMS = {"agent_message", "reasoning", "mcp_tool_call", "plan", "todo_list"}
+_CODEX_NATIVE_ITEMS = {"agent_message", "reasoning", "command_execution", "file_change", "plan", "todo_list"}
 
 
 def _now() -> str:
@@ -40,7 +44,7 @@ def _private_file(path: Path, content: str) -> None:
         stream.write(content)
 
 
-def _environment(home: Path, model: ModelSettings, token: str) -> dict[str, str]:
+def _environment(home: Path, model: ModelSettings, token: str | None = None) -> dict[str, str]:
     # Avoid inheriting a developer's cloud credentials or another agent's login,
     # model endpoint, config directory, proxy, or runtime options.
     environment = {
@@ -58,29 +62,35 @@ def _environment(home: Path, model: ModelSettings, token: str) -> dict[str, str]
         "CODEX_HOME": str(home / ".codex"),
         "CLAUDE_CONFIG_DIR": str(home / ".claude"),
         "MINT_MODEL_API_KEY": model.api_key or "local-model",
-        "MINT_MCP_TOKEN": token,
         "NO_PROXY": "127.0.0.1,localhost",
     })
+    if token is not None:
+        environment["MINT_MCP_TOKEN"] = token
     return environment
 
 
 def _codex_command(
     prefix: tuple[str, ...], home: Path, workdir: Path, model: ModelSettings,
-    bridge: Any, url: str,
+    bridge: Any, url: str | None, options: CodexSettings | None = None,
 ) -> list[str]:
+    options = options or CodexSettings()
+    native = options.mode == "native"
+    sandbox = options.sandbox if native else "read-only"
     codex_home = home / ".codex"
     codex_home.mkdir(mode=0o700)
-    instructions = home / "finance-instructions.md"
-    _private_file(instructions, bridge.system_prompt)
     quote = lambda value: json.dumps(value, ensure_ascii=False)
-    tool_names = [item["function"]["name"] for item in bridge.tool_definitions]
+    instructions_config = []
+    if not native:
+        instructions = home / "finance-instructions.md"
+        _private_file(instructions, bridge.system_prompt)
+        instructions_config.append(f"model_instructions_file = {quote(str(instructions))}")
     base_url = model.origin + "/v1"
-    configuration = "\n".join([
+    configuration_lines = [
         f"model = {quote(model.model)}",
         'model_provider = "mint_finance"',
-        f"model_instructions_file = {quote(str(instructions))}",
+        *instructions_config,
         'approval_policy = "never"',
-        'sandbox_mode = "read-only"',
+        f"sandbox_mode = {quote(sandbox)}",
         'web_search = "disabled"',
         "project_doc_max_bytes = 0",
         "[history]",
@@ -88,9 +98,9 @@ def _codex_command(
         "[analytics]",
         "enabled = false",
         "[features]",
-        "shell_tool = false",
+        f"shell_tool = {'true' if native else 'false'}",
         "shell_snapshot = false",
-        "view_image = false",
+        f"view_image = {'true' if native else 'false'}",
         "apps = false",
         "multi_agent = false",
         "memories = false",
@@ -108,33 +118,41 @@ def _codex_command(
         "requires_openai_auth = false",
         "supports_websockets = false",
         f"stream_idle_timeout_ms = {max(1000, int(model.timeout_seconds * 1000))}",
-        "[mcp_servers.finance]",
-        f"url = {quote(url)}",
-        'bearer_token_env_var = "MINT_MCP_TOKEN"',
-        "required = true",
-        f"enabled_tools = {quote(tool_names)}",
-        'default_tools_approval_mode = "auto"',
-        "supports_parallel_tool_calls = false",
-        "startup_timeout_sec = 30",
-        f"tool_timeout_sec = {max(1, int(model.timeout_seconds))}",
-        "",
-    ])
-    _private_file(codex_home / "config.toml", configuration)
+    ]
+    if native:
+        configuration_lines.extend([
+            "[sandbox_workspace_write]", "network_access = false",
+            "[shell_environment_policy]", "ignore_default_excludes = false",
+            "[mcp_servers]",
+        ])
+    else:
+        tool_names = [item["function"]["name"] for item in bridge.tool_definitions]
+        configuration_lines.extend([
+            "[mcp_servers.finance]", f"url = {quote(url)}",
+            'bearer_token_env_var = "MINT_MCP_TOKEN"', "required = true",
+            f"enabled_tools = {quote(tool_names)}", 'default_tools_approval_mode = "auto"',
+            "supports_parallel_tool_calls = false", "startup_timeout_sec = 30",
+            f"tool_timeout_sec = {max(1, int(model.timeout_seconds))}",
+        ])
+    _private_file(codex_home / "config.toml", "\n".join([*configuration_lines, ""]))
     return [*prefix, "exec", "--json", "--ephemeral", "--strict-config", "--ignore-rules",
-            "--skip-git-repo-check", "--sandbox", "read-only", "--cd", str(workdir), "-"]
+            "--skip-git-repo-check", "--sandbox", sandbox, "--cd", str(workdir), "-"]
 
 
 def _claude_command(
     prefix: tuple[str, ...], home: Path, model: ModelSettings, bridge: Any,
-    url: str, token: str, environment: dict[str, str],
+    url: str | None, token: str | None, environment: dict[str, str],
+    options: ClaudeCodeSettings | None = None,
 ) -> list[str]:
+    options = options or ClaudeCodeSettings()
     (home / ".claude").mkdir(mode=0o700)
-    configuration = home / "finance-mcp.json"
+    native = options.mode == "native"
+    configuration = home / "mcp.json"
     _private_file(configuration, json.dumps({
-        "mcpServers": {"finance": {"type": "http", "url": url,
-                                    "headers": {"Authorization": f"Bearer {token}"}}},
+        "mcpServers": {} if native else {"finance": {"type": "http", "url": url,
+                                                        "headers": {"Authorization": f"Bearer {token}"}}},
     }, ensure_ascii=False))
-    tool_names = ["mcp__finance__" + item["function"]["name"] for item in bridge.tool_definitions]
+    tool_names = [] if native else ["mcp__finance__" + item["function"]["name"] for item in bridge.tool_definitions]
     environment.update({
         "ANTHROPIC_BASE_URL": model.origin,
         "ANTHROPIC_API_KEY": model.api_key or "local-model",
@@ -148,11 +166,19 @@ def _claude_command(
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     })
+    permissions = (["--allowedTools", *options.allowed_tools] if options.allowed_tools else []) if native else [
+        "--allowedTools", ",".join(tool_names)]
     return [
-        *prefix, "--print", "--bare", "--tools", "", "--strict-mcp-config", "--mcp-config", str(configuration),
-        "--allowedTools", ",".join(tool_names), "--permission-mode", "dontAsk",
-        "--disable-slash-commands", "--no-session-persistence", "--output-format", "stream-json",
-        "--verbose", "--include-partial-messages", "--system-prompt", bridge.system_prompt,
+        *prefix, "--print", *([] if native else ["--bare"]),
+        "--tools", ",".join(options.tools) if native else "",
+        "--strict-mcp-config", "--mcp-config", str(configuration),
+        *(["--disallowedTools", "mcp__*"] if native else []),
+        *permissions,
+        "--permission-mode", "dontAsk",
+        *([] if native else ["--disable-slash-commands"]),
+        "--no-session-persistence", "--output-format", "stream-json",
+        "--verbose", "--include-partial-messages",
+        *([] if native else ["--system-prompt", bridge.system_prompt]),
         "--model", model.model,
     ]
 
@@ -184,7 +210,8 @@ def _terminate_tree(process: subprocess.Popen) -> None:
     process.wait(timeout=5)
 
 
-def _audit_events(path: Path, runtime: str, tool_names: set[str]) -> tuple[int, str | None]:
+def _audit_events(path: Path, runtime: str, tool_names: set[str], *, claude_native: bool = False,
+                  codex_native: bool = False) -> tuple[int, str | None]:
     count = 0
     failure = None
     with path.open("rb") as stream:
@@ -206,7 +233,11 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str]) -> tuple[int, 
                 item = event.get("item")
                 if event_type.startswith("item.") and isinstance(item, dict):
                     kind = item.get("type")
-                    if kind not in _CODEX_ITEMS:
+                    if codex_native and kind == "mcp_tool_call":
+                        failure = failure or "Codex native mode emitted an MCP tool call"
+                    elif codex_native and kind not in _CODEX_NATIVE_ITEMS:
+                        failure = failure or "Codex native mode emitted an unsupported tool event"
+                    elif not codex_native and kind not in _CODEX_ITEMS:
                         failure = failure or "Codex emitted a non-finance or unsupported tool event"
                     elif kind == "mcp_tool_call":
                         if item.get("server") != "finance" or item.get("tool") not in tool_names:
@@ -221,6 +252,10 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str]) -> tuple[int, 
                         continue
                     name = block.get("name")
                     allowed = {"mcp__finance__" + name for name in tool_names} | {"EndConversation"}
+                    if claude_native:
+                        if not isinstance(name, str) or name.startswith("mcp__"):
+                            failure = failure or "Claude Code native mode emitted an MCP or invalid tool call"
+                        continue
                     if name not in allowed:
                         failure = failure or "Claude Code emitted a non-finance tool call"
     if count == 0:
@@ -229,6 +264,8 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str]) -> tuple[int, 
 
 
 def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path) -> RuntimeResult:
+    # In CLI native mode the first argument is a data-only HarnessCase, not a
+    # FinanceToolBridge. No session or custom tool server is constructed.
     if settings.name not in {"codex", "claude_code"}:
         raise ValueError("CLI runtime must be codex or claude_code")
     if settings.extra_args:
@@ -259,6 +296,15 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
         "sampling_parameters": "runtime-managed",
         "status": "running",
     }
+    claude_native = settings.name == "claude_code" and settings.claude_code.mode == "native"
+    codex_native = settings.name == "codex" and settings.codex.mode == "native"
+    native = claude_native or codex_native
+    if settings.name == "claude_code":
+        metadata["claude_code_mode"] = settings.claude_code.mode
+    elif settings.name == "codex":
+        metadata["codex_mode"] = settings.codex.mode
+        if codex_native:
+            metadata["sandbox"] = settings.codex.sandbox
     atomic_json(metadata_path, metadata)
     started = time.monotonic()
     status, error, exit_code = "failed", None, None
@@ -267,40 +313,57 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
             home = Path(temporary)
             workdir = home / "workspace"
             workdir.mkdir(mode=0o700)
-            with FinanceMCPServer(bridge) as mcp:
-                environment = _environment(home, model, mcp.token)
+            with (nullcontext() if native else FinanceMCPServer(bridge)) as mcp:
+                environment = _environment(home, model, None if native else mcp.token)
                 if settings.name == "codex":
-                    command = _codex_command(prefix, home, workdir, model, bridge, mcp.url)
+                    command = _codex_command(prefix, home, workdir, model, bridge, None if native else mcp.url,
+                                             settings.codex)
                 else:
-                    command = _claude_command(prefix, home, model, bridge, mcp.url, mcp.token, environment)
-                prompt = ("Complete the financial query in this public state. Use only the finance MCP tools, "
-                          "and finish by calling submit_final with the proof.\n" + json.dumps(bridge.public_state(), ensure_ascii=False))
+                    command = _claude_command(prefix, home, model, bridge, None if claude_native else mcp.url,
+                                              None if claude_native else mcp.token, environment, settings.claude_code)
+                prompt = (prepare_workspace(bridge, workdir, trace_dir, runtime="codex") if codex_native else
+                          prepare_workspace(bridge, workdir, trace_dir)) if native else (
+                    "Complete the financial query in this public state. Use only the finance MCP tools, "
+                    "and finish by calling submit_final with the proof.\n" + json.dumps(bridge.public_state(), ensure_ascii=False))
                 with os.fdopen(os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stdout:
                     with os.fdopen(os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stderr:
                         options: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {
                             "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                         }
-                        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
-                                                   cwd=workdir, env=environment, **options)
                         try:
-                            process.communicate(input=prompt.encode("utf-8"), timeout=settings.timeout_seconds)
-                            exit_code = process.returncode
-                        except subprocess.TimeoutExpired:
-                            status, error = "timeout", "CLI exceeded its execution deadline"
-                            _terminate_tree(process)
-                            exit_code = process.returncode
-                        except BaseException:
-                            _terminate_tree(process)
-                            raise
-                count, audit_error = _audit_events(stdout_path, settings.name, {
+                            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr,
+                                                       cwd=workdir, env=environment, **options)
+                            try:
+                                process.communicate(input=prompt.encode("utf-8"), timeout=settings.timeout_seconds)
+                                exit_code = process.returncode
+                            except subprocess.TimeoutExpired:
+                                status, error = "timeout", "CLI exceeded its execution deadline"
+                                _terminate_tree(process)
+                                exit_code = process.returncode
+                            except BaseException:
+                                _terminate_tree(process)
+                                raise
+                        finally:
+                            if native:
+                                finish_workspace(workdir, trace_dir)
+                count, audit_error = _audit_events(stdout_path, settings.name, set() if native else {
                     item["function"]["name"] for item in bridge.tool_definitions
-                })
+                }, claude_native=claude_native, codex_native=codex_native)
                 metadata["event_count"] = count
                 if status != "timeout":
                     if exit_code != 0:
                         error = "CLI exited with a nonzero status"
                     elif audit_error:
                         error = audit_error
+                    elif claude_native:
+                        native_final_reply(stdout_path)
+                        status = "completed"
+                    elif codex_native:
+                        final_text, final_id = codex_final_reply(stdout_path)
+                        metadata["final_text_sha256"] = hashlib.sha256(final_text.encode()).hexdigest()
+                        if final_id is not None:
+                            metadata["final_message_id"] = final_id
+                        status = "completed"
                     elif bridge.done:
                         status = "completed"
                     else:

@@ -27,7 +27,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <main class="wrap">
 <div class="eyebrow">V3 · FINANCIAL DATA SYNTHESIS · LINUX RUNTIME</div>
 <h1>工程架构与运行边界</h1>
-<p class="lead">从原始金融语料出发，用有出处的事实构造可执行的证据 DAG，再生成并验证问题；按需让强教师模型通过统一金融环境执行问题，产出可审计的 agent 轨迹与 SFT 样本。</p>
+<p class="lead">从原始金融语料出发，用有出处的事实构造可执行的证据 DAG，再生成并验证问题；按需让强教师模型通过金融工具或框架原生工具执行问题，使用共享的隐藏答案与证据约束验收，产出可审计的 agent 轨迹与 SFT 样本。</p>
 <div class="links"><a href="data-synthesis-flow.html">完整数据合成技术流程 →</a><a href="methodology.md">方法与实现边界</a><a href="teacher-runtimes.md">教师 runtimes 配置</a><a href="harness.md">Harness API</a><a href="../slurm/README.md">SLURM 运行</a></div>
 <div class="grid four stats">
 <div class="card"><strong>2 条交付分支</strong><span>独立 query 数据 / 可选教师 SFT 数据</span></div>
@@ -58,12 +58,12 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 </div></div>
 <div class="layer"><div class="layer-label"><b>执行与教师层</b>可选生成轨迹</div><div class="nodes">
 <div class="node"><h4>冻结语料与检索索引</h4><p>从 chunks 构建 SQLite 快照，并结合实体分区事实建立检索索引，固定 cutoff 与来源。</p></div>
-<div class="node runtime"><h4>Native / Strands / Codex / CC</h4><p>保留不同的 agent loop；共享金融工具、任务限制和最终证明校验。外部 runtime 保留协议层轨迹。</p></div>
-<div class="node"><h4>HarnessSession</h4><p>维护动作、预算、证据账本和工作记忆；私有 grade 不暴露给模型，成功证明才进入 SFT。</p></div>
+<div class="node runtime"><h4>Native / Strands / Codex / CC</h4><p>保留不同的 agent loop；Strands、Codex、CC 支持金融与原生两种工具模式。外部 runtime 保留协议层轨迹。</p></div>
+<div class="node"><h4>在线环境 / 离线校验</h4><p>金融模式由 HarnessSession 管理动作、预算和账本；原生模式在语料文件中研究，结束后绑定真实读取并校验证明。</p></div>
 </div></div>
 <div class="layer"><div class="layer-label"><b>发布层</b>按用途分离</div><div class="nodes">
 <div class="node output"><h4>Query 数据</h4><p>train/val 只有 query；隐藏校验单独保存任务、证据、答案图与快照引用。</p></div>
-<div class="node output"><h4>SFT messages</h4><p>atomic 与 long 分别输出；工具观察不计算 loss，私有审计数据保存在 sidecar。</p></div>
+<div class="node output"><h4>按协议分别输出</h4><p>atomic / 金融 long 使用统一 messages；原生 Codex、Strands、CC 保留各自逐请求协议。私有审核放在 sidecar / native audit。</p></div>
 <div class="node output"><h4>审计与发布清单</h4><p>保存成功/失败轨迹、质量统计、文件大小与可选 SHA-256，再写 _PUBLISHED.json。</p></div>
 </div></div>
 </div>
@@ -88,28 +88,29 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 </tbody></table></div>
 <div class="grid">
 <div class="card"><span class="tag rule">QUERY</span><h3>先交付可验证的问题</h3><p><code>validation + retrieval_index → query_export</code>。模型输入为纯 query，隐藏校验与快照由外部使用者单独加载。教师合成失败时，已经完成的 query 分片仍可使用。</p><p class="muted">只生成 query：关闭 <code>training.enabled</code> 与 <code>atomic.enabled</code>，保留 <code>query_export.enabled</code>。</p></div>
-<div class="card"><span class="tag optional">TEACHER SFT</span><h3>按需交付实际执行轨迹</h3><p><code>validation + retrieval_index → sft_prepare</code>。长程教师通过工具取得证据并提交证明，校验通过后进入 long messages。原子教师使用独立生成与审核路径。</p><p class="muted">两条分支独立产出；最终 export 等待所有已启用分支完成。</p></div>
+<div class="card"><span class="tag optional">TEACHER SFT</span><h3>按需交付实际执行轨迹</h3><p><code>validation + retrieval_index → sft_prepare</code>。长程教师通过金融或框架原生工具取得证据，证明通过校验后进入对应格式的样本文件。原子教师使用独立生成与审核路径。</p><p class="muted">两条分支独立产出；最终 export 等待所有已启用分支完成。</p></div>
 </div>
 </section>
 
 <section class="section" id="runtimes">
 <h2>03 / Agent runtime 与金融环境解耦</h2>
-<p class="intro">替换的是长程教师的决策循环与上下文组织方式。事实、DAG、query 构造和私有校验继续使用项目实现。<code>training.agent_runtime.default / by_role</code> 选择 runtime，模型与密钥由 <code>llm.roles / endpoints</code> 配置。</p>
+<p class="intro">替换的是长程教师的决策循环、上下文与工具集合。事实、DAG、query 构造和隐藏答案约束继续使用项目实现。<code>training.agent_runtime.default / by_role</code> 选择 runtime，模型与密钥由 <code>llm.roles / endpoints</code> 配置；Strands、Codex、CC 各自的 <code>mode</code> 默认 finance，可切换 native。</p>
 <div class="diagram">
 <div class="grid four">
 <div class="node runtime"><h4>Native</h4><p>项目 JSON 动作循环<br>observe → 模型 → step<br>可复用角色请求缓存</p></div>
-<div class="node runtime"><h4>Strands</h4><p>SDK 原生工具调用<br>SequentialToolExecutor<br>SDK 维护消息历史</p></div>
-<div class="node runtime"><h4>Codex</h4><p>非交互 CLI agent loop<br>独立临时配置与 HOME<br>finance MCP HTTP</p></div>
-<div class="node runtime"><h4>Claude Code</h4><p>非交互 CLI agent loop<br>--bare / 显式 MCP<br>关闭内置工具与自动发现</p></div>
+<div class="node runtime"><h4>Strands</h4><p>SDK agent loop 与消息历史<br>finance：金融工具包装<br>native：官方 strands_tools</p></div>
+<div class="node runtime"><h4>Codex</h4><p>非交互 CLI agent loop<br>finance：finance MCP<br>native：自带 shell / 文件工具</p></div>
+<div class="node runtime"><h4>Claude Code</h4><p>非交互 CLI agent loop<br>finance：finance MCP<br>native：自带 Read / Bash 等</p></div>
 </div>
 <div class="down" aria-hidden="true">↓</div>
 <div class="flow">
-<div class="node"><h4>统一金融动作</h4><p>native 直接调用 session；外部 runtime 经 FinanceToolBridge。CLI 通过 MCP，Strands 通过 SDK 工具包装。</p></div>
+<div class="node"><h4>金融工具模式</h4><p>项目 native 直接调用 session；外部 finance 经 FinanceToolBridge。CLI 通过 MCP，Strands 通过 SDK 金融工具包装。</p></div>
 <span class="arrow" aria-hidden="true">→</span>
 <div class="node"><h4>HarnessSession.step()</h4><p>search_corpus / open_chunk / calculate；更新步骤、工具预算、证据账本、工作记忆与可见观察。</p></div>
 <span class="arrow" aria-hidden="true">→</span>
-<div class="node output"><h4>最终提交与私有校验</h4><p>外部 submit_final(proof) 转为 final 动作；检查引用、计算与答案，合格后输出规范化 SFT。</p></div>
+<div class="node output"><h4>最终提交与私有校验</h4><p>金融模式的 submit_final(proof) 转为 final 动作；检查引用、计算与答案，合格后输出统一金融 SFT。</p></div>
 </div></div>
+<div class="callout"><strong>原生工具模式：普通语料文件 → 框架工具执行 → 正常最终答复 → 离线审核。</strong><p>Strands、Codex、CC 的 native 模式不创建金融 bridge / session / MCP，不注册 submit_final；保留各自原生工具和默认 system。采集器给出问题、冻结语料目录与 proof 格式，随后核对实际读取、文件完整性和最终证明。项目的 <code>default: native</code> JSON runtime 与这三个框架的 <code>mode: native</code> 含义不同。</p></div>
 <div class="table-wrap"><table><thead><tr><th>Runtime</th><th>模型协议</th><th>接入实现</th><th>上下文与采样</th></tr></thead><tbody>
 <tr><td>native</td><td>OpenAI Chat Completions，JSON 动作</td><td><a href="../src/mint_synth/sft/rollout.py">sft/rollout.py</a></td><td>项目可见状态打包；角色 temperature/max_tokens；角色缓存按配置生效。</td></tr>
 <tr><td>strands</td><td>OpenAI Chat Completions，工具调用</td><td><a href="../src/mint_synth/agents/strands_runtime.py">agents/strands_runtime.py</a></td><td>裸 SDK Agent 与自身消息历史；角色 temperature/max_tokens；不复用 native JSON 请求缓存。</td></tr>
@@ -117,8 +118,8 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <tr><td>claude_code</td><td>Anthropic Messages</td></tr>
 </tbody></table></div>
 <div class="grid three">
-<div class="card"><h3>同一任务环境</h3><p>每次尝试创建独立 session。外部 runtime 的金融调用进入专属拥有者线程，串行操作 SQLite 和状态；模型不能调用私有 <code>grade()</code>。</p></div>
-<div class="card"><h3>最终证明才是提交</h3><p>CLI 退出码为 0 或 SDK 自然结束不足以证明任务完成，必须在预算内提交最终证明，通过环境验收；外部 runtime 还检查模型采集是否完成。</p></div>
+<div class="card"><h3>同一任务与校验约束</h3><p>金融模式每次尝试创建独立 session，调用进入专属线程；原生模式使用独立工作目录，Strands 另用子进程隔离。两者都不向模型暴露私有 <code>grade()</code> 或 gold DAG。</p></div>
+<div class="card"><h3>最终证明才是验收依据</h3><p>CLI 返回 0 或 SDK 自然结束不足以接纳轨迹。金融模式校验最终提交，原生模式校验最后正常回复及真实来源读取；还需确认模型 HTTP 采集完整。</p></div>
 <div class="card"><h3>教师选择有停止条件</h3><p>按配置轮换长程教师角色，首条合格轨迹出现后停止该任务的后续尝试。多角色配置不代表每个任务都运行全部 runtime。</p></div>
 </div>
 <p class="caption">自定义工具通过注册表扩展，定义、实现与声明资源纳入辅助指纹。接口见 <a href="harness.md">Harness 文档</a>，runtime 配置与限制见 <a href="teacher-runtimes.md">教师 runtimes 文档</a>。</p>
@@ -126,7 +127,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 
 <section class="section" id="tracing">
 <h2>04 / 三层轨迹：调用内容、框架执行、证据状态</h2>
-<p class="intro">部署后端记录收到的请求与返回内容；完整合成审计还需要框架事件和工具环境记录。三层分别保存，实际金融动作再规范化为对外 SFT messages。</p>
+<p class="intro">部署后端记录收到的请求与返回内容；完整合成审计还需要框架事件和取证记录。金融模式导出统一 messages，原生模式保留各协议的逐请求输入与输出，分别发布。</p>
 <div class="flow">
 <div class="node runtime"><h4>Agent 决策</h4><p>SDK/CLI 发出模型请求，处理返回，决定下一步工具调用。</p></div><span class="arrow" aria-hidden="true">→</span>
 <div class="node"><h4>本地 TraceProxyServer</h4><p>外部 runtime 每次尝试自动启动；转发 HTTP，保留请求/响应/SSE 字节与时间。</p></div><span class="arrow" aria-hidden="true">→</span>
@@ -135,9 +136,9 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <div class="grid three" style="margin-top:18px">
 <div class="card"><div class="number">L1 · MODEL</div><h3>模型协议层</h3><p>保存实际 prompt、工具定义、采样字段和服务返回的文本/工具调用/SSE。服务返回哪些 token、logprob 或 reasoning 字段，就保留哪些字段。</p><p><code>model/run.json</code><br><code>model/calls/*</code></p><p class="muted">不会从文本反推 token IDs，也不生成服务未返回的内部推理内容。</p></div>
 <div class="card"><div class="number">L2 · RUNTIME</div><h3>框架执行层</h3><p>Strands 保存 SDK 回调与消息历史；Codex/CC 保存 JSONL/stream-json 和诊断，可解释调用次序、框架状态与失败位置。</p><p><code>agent.events.jsonl</code><br><code>agent.messages.json</code><br>或 <code>stdout.jsonl / stderr.log / cli.json</code></p></div>
-<div class="card"><div class="number">L3 · ENVIRONMENT</div><h3>金融环境层</h3><p>真实动作与观察、证据账本、最终证明及私有 verdict，确认模型是否实际读到来源、计算和答案是否成立。</p><p><code>environment.json</code><br><code>result.json</code></p><p class="muted">隐藏答案与校验结论仅用于审计，不回传到模型工具观察。</p></div>
+<div class="card"><div class="number">L3 · ENVIRONMENT</div><h3>证据与校验层</h3><p>金融模式保留动作、观察与账本；原生模式保留语料完整性、原生读取绑定和离线 verdict。最终证明必须与来源及隐藏图一致。</p><p><code>environment.json / result.json</code><br><code>native-workspace.json / native-audit.json</code></p><p class="muted">隐藏答案与校验结论不进入模型输入。</p></div>
 </div>
-<div class="callout"><strong>原始记录与规范化样本承担不同用途。</strong><p>long messages 来自真实环境动作和观察，包含 <code>tool_call / tool_response</code> 与最终证明，并非 SDK/CLI 对话的逐字复制。native 保存 <code>model.parsed.json</code>：实际输入和解析后的 JSON 输出，可能来自缓存，不能视作原始 HTTP 记录。</p></div>
+<div class="callout"><strong>统一金融样本与原生协议样本分别发布。</strong><p>金融 long messages 绑定模型实际文本、调用与环境结果；原生模式按每次真实请求导出 Codex Responses items、Strands Chat Completions messages 或 CC Anthropic 内容块，保留工具原名和 schema。项目 native 的完整请求与响应 JSON 在 <code>model/calls</code>，可来自完整响应缓存；<code>model.parsed.json</code> 仅为兼容摘要。</p></div>
 <p>每次长程尝试都写轨迹引用，包括失败和超时。外部 runtime 停止后检查采集代理是否空闲，再冻结记录，避免迟到流式响应修改已发布文件。原始轨迹可能包含完整来源内容，HTTP 凭据头脱敏不等于正文通用脱敏。</p>
 </section>
 
@@ -174,10 +175,10 @@ bash scripts/submit_slurm.sh /shared/outputs/runs/&lt;run_id&gt; \
 </div>
 <div class="grid three" style="margin-top:16px">
 <div class="card"><h3>并发分为两层</h3><p><code>--workers</code> 控制当前阶段的分片进程；角色客户端按 <code>llm.concurrency_per_worker</code> 处理并发。</p><p class="muted">CLI/SDK 还有自身请求行为，实际峰值取决于当前阶段与 runtime，不能统一用两配置值相乘推定。</p></div>
-<div class="card"><h3>本地代理与工具服务</h3><p>每次外部教师尝试启动 loopback 采集代理；CLI 再连接带随机 bearer token 的 finance MCP。容器化时三者须处于可互通的网络命名空间。</p></div>
+<div class="card"><h3>本地代理与工具服务</h3><p>每次外部教师尝试启动 loopback 采集代理；CLI 金融模式另连接带 token 的 finance MCP。原生模式直接使用语料文件，不创建 MCP。容器内须能访问本地代理。</p></div>
 <div class="card"><h3>协议兼容是部署条件</h3><p>Strands 需要 Chat Completions 工具调用；Codex 需要 Responses；CC 需要 Anthropic Messages。模型服务或网关须提供对应协议，并匹配工具 parser 与模板。</p></div>
 </div>
-<div class="callout"><strong>会话配置隔离与超时处理已实现。</strong><p>CLI 使用独立临时 HOME、空工作目录与显式工具配置；Codex 禁用已知额外能力，CC 只启用 finance MCP。事件审计拒收非金融工具执行，配置限制不能代替操作系统隔离。Linux 超时终止 CLI 进程组，Strands 超时取消执行并冻结记录；自定义 Python 工具仍需自行保证有界执行时间。</p></div>
+<div class="callout"><strong>工具模式决定执行边界。</strong><p>CLI 使用独立临时 HOME 和工作目录；finance 限定金融工具，native 启用框架自带工具且拒绝 MCP 注入。Codex native 保留所选 sandbox，Strands native 在子进程内运行官方工具。Linux 超时终止对应进程组并冻结记录。工具配置与完整性校验不能代替操作系统隔离；不重新执行任意 shell 命令来校验结果。</p></div>
 </section>
 
 <section class="section" id="recovery">
@@ -218,6 +219,9 @@ mint-synth validate --run-dir /shared/outputs/runs/&lt;run_id&gt;</pre>
   sft/
     atomic-train/val.jsonl     原子教师 messages
     long-train/val.jsonl       长程规范化 messages
+    codex-native-{train,val}.jsonl   Responses 原生逐请求
+    strands-native-{train,val}.jsonl Chat Completions 原生逐请求
+    cc-native-{train,val}.jsonl      Anthropic 原生逐请求
     audit-sidecar.jsonl        标签、答案与候选审计
     trajectory-index.jsonl     所有长程尝试的引用
     traces/&lt;shard&gt;/&lt;attempt&gt;/ 原始轨迹
@@ -228,7 +232,7 @@ mint-synth validate --run-dir /shared/outputs/runs/&lt;run_id&gt;</pre>
 <div class="table-wrap"><table><thead><tr><th>使用者</th><th>读取内容</th><th>数据边界</th></tr></thead><tbody>
 <tr><td>下游问题执行框架</td><td><code>queries/train.jsonl</code> / <code>val.jsonl</code></td><td>模型仅接收 query；隐藏任务、答案图与 verdict 不进入模型输入。</td></tr>
 <tr><td>环境服务 / 校验器</td><td>query manifest、hidden-verifier、对应 retrieval snapshot</td><td>快照仍在 run 内 retrieval_index；复制 query 时须保留引用快照与相对目录关系，或使用约定的环境加载方式。</td></tr>
-<tr><td>SFT 数据消费方</td><td><code>atomic-*.jsonl</code> / <code>long-*.jsonl</code></td><td>使用 messages/tools/loss；不拼接私有 sidecar 或原始轨迹作为模型输入。</td></tr>
+<tr><td>SFT 数据消费方</td><td>atomic / long，及三种框架各自的 native 文件</td><td>按 manifest 区分统一金融与原生协议；按学生模板处理监督范围，不将不同协议直接混为同一 messages 格式。</td></tr>
 <tr><td>开发、审核与质量分析</td><td>原始任务、sidecar、trajectory-index 和 traces</td><td>轨迹含完整 prompt、模型输出与来源。Linux 采集轨迹使用目录 0700 / 文件 0600，按数据权限管理。</td></tr>
 </tbody></table></div>
 <p class="caption">query_export 先独立保存 query 分片，export 再复制到汇总目录。SFT 轨迹引用在汇总时重写为发布后路径，成功、拒绝与超时均可追查。</p>

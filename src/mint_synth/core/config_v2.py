@@ -76,6 +76,38 @@ def _schema(version: int = 2) -> dict[str, Any]:
                                                             "items": {"type": "string", "minLength": 1}}
                                                     for name in ("codex", "claude_code")}},
                         "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 600},
+                        "codex": {
+                            "type": "object", "additionalProperties": False, "default": {},
+                            "properties": {
+                                "mode": {"enum": ["finance", "native"], "default": "finance"},
+                                "sandbox": {"enum": ["read-only", "workspace-write"], "default": "workspace-write"},
+                            },
+                        },
+                        "strands": {
+                            "type": "object", "additionalProperties": False, "default": {},
+                            "properties": {
+                                "mode": {"enum": ["finance", "native"], "default": "finance"},
+                                "tools": {"type": "array", "minItems": 1, "uniqueItems": True,
+                                          "default": ["file_read", "shell"],
+                                          "items": {"enum": ["file_read", "file_write", "shell", "python_repl"]}},
+                            },
+                        },
+                        "claude_code": {
+                            "type": "object", "additionalProperties": False, "default": {},
+                            "properties": {
+                                "mode": {"enum": ["finance", "native"], "default": "finance"},
+                                "tools": {"type": "array", "uniqueItems": True, "default": ["default"],
+                                          "items": {"type": "string", "minLength": 1, "pattern": "^[^-\\s]"},
+                                          "allOf": [{"if": {"contains": {"const": "default"}}, "then": {"maxItems": 1}}]},
+                                "allowed_tools": {"type": "array", "uniqueItems": True, "default": [],
+                                                  "items": {"type": "string", "minLength": 1, "pattern": "^[^-\\s]"}},
+                            },
+                            "allOf": [{"if": {"properties": {"mode": {"const": "native"}}, "required": ["mode"]},
+                                       "then": {"properties": {
+                                           "tools": {"items": {"pattern": "^(default|[A-Z][A-Za-z0-9_]*)$"}},
+                                           "allowed_tools": {"items": {"pattern": "^[A-Z][A-Za-z0-9_]*(\\([^\\r\\n]*\\))?$"}},
+                                       }}}],
+                        },
                     },
                 },
                 "rollouts_per_task": {"type": "integer", "minimum": 1, "maximum": 8, "default": 2},

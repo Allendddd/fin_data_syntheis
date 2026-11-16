@@ -755,7 +755,7 @@
       <div class="wrap">
         <div class="section-head">
           <div><div class="eyebrow">Teacher execution and trace collection</div><h2>08 · 强模型 agent 如何生成长程轨迹</h2></div>
-          <p>合成任务已经有私有答案图；教师只收到 query、公开状态和工具定义，自行选择检索与计算过程。现有金融环境和校验器保持统一，执行 loop 可替换。</p>
+          <p>合成任务已经有私有答案图；教师收到 query 和公开执行条件，自行选择检索与计算过程。Strands、Codex、Claude Code 均可选金融工具或框架原生工具，结束后采用相同的隐藏答案与证据约束验收。</p>
         </div>
         <div class="proof-loop" aria-label="教师执行循环">
           <div><strong>1 · 公开输入</strong><small>问题、可用工具、剩余预算；隐藏答案图不进入模型输入</small></div>
@@ -764,15 +764,16 @@
           <div><strong>4 · calculate</strong><small>执行允许的计算；可继续检索与打开，直到预算终止</small></div>
           <div><strong>5 · 最终证明</strong><small>提交 facts / steps / answer，私有 verifier 校验后决定接受</small></div>
         </div>
-        <p>上图是一条典型路径。教师可多次搜索、打开与计算，也可直接在证明中给出可回放步骤；<b>并不强制调用 calculate 才算完成</b>。成功标准是已取得必需证据并提交正确证明，而非输出一段看似合理的结论。</p>
+        <p>上图是 <b>finance 金融工具模式</b> 的典型路径。教师可多次搜索、打开与计算，也可直接在证明中给出可回放步骤；<b>并不强制调用 calculate 才算完成</b>。成功标准是已取得必需证据并提交正确证明。</p>
+        <div class="ribbon"><b>原生工具模式的另一条执行路径：</b>query + 冻结语料目录 → Codex 自带 shell / 文件工具，或 Strands 官方 file_read / shell，或 CC 自带 Read / Bash → 正常最终回复中的 JSON proof → 读取与文件完整性核对 → 隐藏图离线校验。此路径不创建金融 session / bridge / MCP，也不注册 submit_final；保留框架本来的工具名、schema 与 system。</div>
         <div class="table-wrap" style="margin-top:18px">
           <table>
             <thead><tr><th>runtime</th><th>agent loop 与环境连接</th><th>所需模型协议</th><th>原始运行轨迹</th></tr></thead>
             <tbody>
-              <tr><td>native</td><td>项目自有 JSON action loop → HarnessSession</td><td>OpenAI Chat Completions，JSON 动作</td><td>model.parsed.json + environment.json</td></tr>
-              <tr><td>strands</td><td>Strands Agent + 顺序工具执行 → FinanceToolBridge</td><td>OpenAI Chat Completions，原生 tool calling</td><td>agent.events.jsonl + agent.messages.json + HTTP capture</td></tr>
-              <tr><td>codex</td><td>Codex exec JSONL → 本地 finance MCP → 同一环境</td><td>OpenAI Responses API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
-              <tr><td>claude_code</td><td>Claude Code headless → 本地 finance MCP → 同一环境</td><td>Anthropic Messages API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
+              <tr><td>native</td><td>项目自有 JSON action loop → HarnessSession</td><td>OpenAI Chat Completions，JSON 动作</td><td>完整响应 JSON / 缓存 + environment.json</td></tr>
+              <tr><td>strands</td><td>finance：SDK 包装金融工具；native：官方 strands_tools，在独立子进程中运行</td><td>OpenAI Chat Completions，tool calling</td><td>agent.events.jsonl + agent.messages.json + HTTP capture</td></tr>
+              <tr><td>codex</td><td>finance：本地 finance MCP；native：Codex 自带工具、默认 system 与配置的 sandbox</td><td>OpenAI Responses API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
+              <tr><td>claude_code</td><td>finance：本地 finance MCP；native：CC 自带工具与默认 system</td><td>Anthropic Messages API</td><td>stdout.jsonl + stderr.log + cli.json + HTTP capture</td></tr>
             </tbody>
           </table>
         </div>
@@ -782,29 +783,30 @@
             <ul>
               <li><b>模型 HTTP：</b>请求、响应、SSE 原始字节和时间，解释模型实际收到和返回了什么。外部 runtime 自动经采集代理连接后端。</li>
               <li><b>SDK / CLI：</b>事件、消息、退出状态、错误与超时，解释运行框架如何推进 agent loop。</li>
-              <li><b>环境：</b>实际工具动作、observation、证据账本与私有 verdict，证明操作是否执行及证据是否取得。</li>
+              <li><b>证据与校验：</b>金融模式保存动作、observation 和证据账本；原生模式绑定真实文件读取、返回文本及文件指纹。两者保留私有 verdict。</li>
             </ul>
             <p class="caption">单靠 vLLM / SGLang 服务日志通常只能看模型调用侧；完整 agent 轨迹还需拼接工具与环境执行记录。运行 ID、attempt 引用与文件索引负责关联。</p>
           </article>
           <article class="card">
             <h3>统一验收，执行路径各自保留</h3>
-            <p>外部 runtime 通过保留工具 <code>submit_final(proof)</code> 提交；native 使用 final 动作。桥接器将提交转成同一 session.step()，更新预算并调用私有证明校验。</p>
-            <p>最终 proof 的固定结构为 <code>answer / facts / constants / steps / terminal</code>；事实必须来自已打开 chunk 的逐字 quote，步骤应覆盖隐藏 gold DAG 的操作、输入顺序和维度。</p>
-            <p>预算耗尽、未知工具、未提交、答案错误、缺少证据或证明结构不匹配都会被拒绝。自然语言结束或 CLI 返回 0 本身不足以接收样本。</p>
+            <p>金融模式的外部 runtime 通过 <code>submit_final(proof)</code> 提交，项目 JSON runtime 使用 final 动作；原生模式从框架最后正常回复取得 proof，并唯一绑定到实际模型响应。</p>
+            <p>proof 的固定结构为 <code>answer / facts / constants / steps / terminal</code>；事实必须来自实际读取的来源文本，步骤覆盖隐藏 gold DAG 的操作、输入顺序和维度。</p>
+            <p>两种模式都检查答案、来源和完整证明。原生模式还核对未改写的语料文件、读取调用 ID 与真实返回，不接受用打印引文伪造读取。CLI 返回 0 或 SDK 自然结束本身不足以接收样本。</p>
           </article>
         </div>
         <details>
           <summary>技术细节：冻结检索、教师采样、mask 与运行边界</summary>
           <div>
             <p><b>检索：</b>corpus_index 保存截止日前及无有效日期的 chunks；retrieval_index 依实体事实建立 source 与 canonical_entity_id 的关联，复制关联来源的完整 chunks，包含未抽取出事实的片段，并建立 SQLite FTS5 trigram 索引，必要时使用 LIKE 回退。当前实现没有 embedding / 向量数据库。检索和打开限制 canonical_entity_id、cutoff，时间敏感任务另要求 dated_only。</p>
-            <p><b>工具契约：</b>search_corpus(query, limit) 最多返回 10 条，带 chunk_id、source_id、日期和前 350 字符 snippet；open_chunk 只能打开之前搜索命中的 chunk，返回完整正文。calculate(operation, values) 支持 add / subtract / multiply / divide / percent_change / average，values 为 2–12 个数；它的操作集与隐藏 DAG replay 不完全相同，例如比率可用 divide 求值，最终 proof 仍按 gold 的 ratio 操作描述。</p>
+            <p><b>金融工具契约：</b>search_corpus(query, limit) 最多返回 10 条，带 chunk_id、source_id、日期和前 350 字符 snippet；open_chunk 只能打开之前搜索命中的 chunk，返回完整正文。calculate(operation, values) 支持 add / subtract / multiply / divide / percent_change / average，values 为 2–12 个数；它的操作集与隐藏 DAG replay 不完全相同，例如比率可用 divide 求值，最终 proof 仍按 gold 的 ratio 操作描述。</p>
+            <p><b>原生工具契约：</b>配置 <code>codex.mode / strands.mode / claude_code.mode: native</code> 启用相应框架的工具。语料包含该实体所有可见分块及干扰材料，公开清单只有来源、日期、路径、chunk ID 与指纹，不按 gold evidence 挑选。来源读取按原生 call ID 与后续工具返回绑定；任意脚本可辅助研究，但不能仅因输出含正确 quote 就作为已取证来源。精确可识别读取形式以离线校验实现为准。</p>
             <p><b>上下文：</b>native 将公开状态按 max_context_chars 打包；Strands 和 CLI 使用各自消息历史管理，因此不同 runtime 的模型可见上下文与行为不完全一致。不能直接承诺迁移 runtime 会提高合格率。</p>
             <p><b>采样：</b>长程按 long_teacher_roles 轮换尝试，总次数受 rollouts_per_task 限制；出现首条合格轨迹即停止。它不是对每种 runtime 完整采样后再全局择优。失败 / 超时尝试也记录在 trajectory-index 与 audit 引用中。</p>
-            <p><b>输出 mask：</b>规范化 long messages 中 system、user、tool_response 的 loss 为 false，最终证明为 true；tool_call 的 loss 来自 step_relevance。启发式会屏蔽重复动作、未新增搜索结果 / 证据的动作；search / open 还参考必需 chunk，calculate 默认可判相关。这不是对所有无用计算的完美识别。</p>
+            <p><b>输出 mask：</b>统一金融 long messages 中 system、user、tool_response 的 loss 为 false，模型实际文本保留为 assistant，工具动作使用 step_relevance。启发式屏蔽重复与部分无关操作，不精确识别所有无用计算。原生模式按每次实际请求分别保留上下文与响应，只将本轮模型输出标为监督目标，不套用金融工具的逐动作相关性 mask。</p>
             <p><b>证明严格性：</b>proof 必须覆盖整张 gold DAG，op、输入顺序、params、步骤值与维度均需匹配；所有 answer / fact / step 的 unit、scale、currency 都要显式填写，空值也需为 null。当前验证器不接受任意代数等价的替代推导。</p>
-            <p><b>隔离：</b>Strands 顺序调用桥接器；CLI 使用临时 HOME、工作目录与专用 finance MCP，限制内置工具并审计事件；session / SQLite 归属专门线程。Linux 超时终止 CLI 进程组，Strands 取消任务并冻结已记录轨迹。自定义 Python 工具仍需自身有界超时。</p>
+            <p><b>隔离：</b>金融模式由桥接器串行维护 session / SQLite；原生模式使用独立语料目录，不创建金融 session。CLI 使用临时 HOME，Codex native 保留 sandbox；Strands native 在子进程中隔离工作目录与工具环境。Linux 超时终止对应进程组并冻结记录。工具配置、只读语料与指纹核验不能代替操作系统隔离。</p>
             <p><b>协议：</b>同样是自部署模型，提供 /chat/completions 不代表已满足 Codex Responses 或 CC Anthropic Messages 的要求。后端须匹配 chat template、tool parser、流式事件与所需协议；当前项目不自动实现这些协议之间的通用转换。</p>
-            <p><b>记录范围：</b>HTTP 采集只保留服务实际返回的数据，无法恢复模型未公开的内部思维、未返回的 token IDs 或 logprobs。native 的 parsed 记录可能来自项目请求缓存，不应称为完整原始 wire capture。</p>
+            <p><b>记录范围：</b>HTTP 采集只保留服务实际返回的数据，无法恢复模型未公开的内部思维、未返回的 token IDs 或 logprobs。项目 JSON native 保存完整请求 / 响应 JSON，可来自完整响应缓存，parsed 文件只是摘要；它与外部 runtime 的原始 wire capture 应分开说明。</p>
           </div>
         </details>
         <p class="source">实现：<a href="../src/mint_synth/harness/session.py">session.py</a><a href="../src/mint_synth/harness/verifier.py">verifier.py</a><a href="../src/mint_synth/agents/collector.py">collector.py</a><a href="../src/mint_synth/agents/cli_runtime.py">cli_runtime.py</a><a href="teacher-runtimes.md">runtime 配置说明</a><a href="agent-tracing.md">轨迹采集说明</a></p>
@@ -825,7 +827,7 @@
             <p><code>hidden-verifier.jsonl</code> 另存 query_id、split、line_index、query_sha256、snapshot_index 与完整 task，用于关联和私有验证，不能作为用户 prompt。</p>
           </article>
           <article class="card">
-            <h3>产品 B：规范化教师 SFT messages</h3>
+            <h3>产品 B：统一金融教师 SFT messages</h3>
             <pre>{
   "messages": [
     {"role":"system","content":"工具与任务协议…","loss":false},
@@ -836,7 +838,7 @@
   ],
   "tools": "序列化的工具定义 JSON"
 }</pre>
-            <p class="caption">这是字段结构示意，省略了中间动作；真实 content 为字符串，proof 为完整可验证 JSON。规范化动作格式不是 Strands / Codex / CC 的逐字原始会话，也不等同于任意训练框架的直接输入格式。</p>
+            <p class="caption">这是统一金融模式的字段示意，省略实际模型分析文本和中间动作；真实 content 为字符串，proof 为完整可验证 JSON。三种框架的原生模式另存原生协议样本，不套用这份 messages 格式。</p>
           </article>
         </div>
         <div class="table-wrap" style="margin-top:18px">
@@ -847,6 +849,9 @@
               <tr><td>queries/hidden-verifier.jsonl</td><td>私有答案图、证据、快照引用和 query 关联信息</td></tr>
               <tr><td>sft/atomic-train.jsonl、atomic-val.jsonl</td><td>context + question 与通过证明校验的 Atomic 教师输出</td></tr>
               <tr><td>sft/long-train.jsonl、long-val.jsonl</td><td>query + 规范化工具动作 / 观察 + 最终证明，含 loss mask</td></tr>
+              <tr><td>sft/codex-native-train.jsonl、codex-native-val.jsonl</td><td>codex_native_v1：实际 Responses request 与完整 output，保留原生工具及输入 / 输出监督范围</td></tr>
+              <tr><td>sft/strands-native-train.jsonl、strands-native-val.jsonl</td><td>strands_native_v1：实际 Chat Completions request，加本次原生 assistant message 与 loss mask</td></tr>
+              <tr><td>sft/cc-native-train.jsonl、cc-native-val.jsonl</td><td>claude_code_native_v1：实际 Anthropic request，加本次响应内容块和 block loss mask</td></tr>
               <tr><td>sft/audit-sidecar.jsonl</td><td>标签、答案、证据与教师候选审核；不进入模型输入</td></tr>
               <tr><td>sft/trajectory-index.jsonl</td><td>每次长程教师尝试的 task_id、role、attempt、runtime、model、trace、accepted、reason；运行 status 见 result.json</td></tr>
               <tr><td>sft/traces/&lt;shard&gt;/&lt;attempt_hash&gt;/</td><td>result.json，及通常包含的 environment.json、对应 HTTP / SDK / CLI 文件；native 早期初始化失败可能只有 result.json</td></tr>
@@ -861,6 +866,7 @@
             <p><code>training.capabilities / financial_topics / objective_types / formula_ids / seed_ids</code> 是筛选白名单；空列表表示不限制。capabilities 用于 Atomic，objective_types / formula_ids / seed_ids 用于长程任务；financial_topics 两类共用。financial_topic 按指标关键词依序匹配 revenue、profitability、cash_flow、balance_sheet、valuation，否则 other；多主题任务也只取先匹配项，不能称为经过专家逐条标注的行业主题。</p>
             <p>当前没有统一的 easy / medium / hard 难度字段。可报告 replay depth、事实叶数、来源数和 operation_count 等结构指标，并通过实际教师成功率与工具步数观察求解难度。</p>
             <p>train / val 使用 task_id 的 SHA-256 前 12 个十六进制位稳定映射，默认验证集比例 5%。同一 task 的 query 与 SFT 使用一致划分，但不保证实体、来源或相似问题在两侧完全隔离；严格评估需额外分组与泄漏检查。</p>
+            <p>原生模式每次模型请求一行，同一任务的全部请求进入同一 split；最低长轨迹门槛按合格完整轨迹数计算，不能用多个请求放大门槛。manifest 按格式标注各文件；训练端需按学生模板分别适配 Responses items、Chat Completions messages 与 Anthropic 内容块。</p>
             <p>query_export 的阶段产物在 <code>stages/query_export/shards/000000/queries/</code>，教师失败时已导出的 query 仍可使用。最终 export 产物位于 <code>stages/export/shards/000000/</code>，汇总启用的 query 与 SFT 分支并生成发布清单。</p>
             <p>长程尝试 trace 从各 sft_prepare shard 复制到发布的 sft/traces 目录，audit / trajectory 索引中的相对引用一并改写。原始 trace 含 prompt、来源文本与模型输出；Linux 文件权限为目录 0700 / 文件 0600，HTTP 凭据头脱敏，正文不做通用脱敏。</p>
           </div>
