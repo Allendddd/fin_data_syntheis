@@ -8,6 +8,7 @@ from .indexes import stage_corpus_index, stage_retrieval_index
 from .query_export import stage_query_export
 from .sft_data import stage_sft_prepare
 from .publication import stage_export
+from .seeds import stage_seed_prepare
 
 
 HANDLERS: dict[str, StageHandler] = {
@@ -18,6 +19,7 @@ HANDLERS: dict[str, StageHandler] = {
     "atomic": stage_atomic,
     "entity_resolution": stage_entity_resolution,
     "repartition": stage_repartition,
+    "seed_prepare": stage_seed_prepare,
     "graph_planning": stage_graph_planning,
     "query_realization": stage_query_realization,
     "validation": stage_validation,

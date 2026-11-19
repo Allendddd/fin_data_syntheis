@@ -15,7 +15,7 @@ from mint_synth.harness.registry import ToolRegistry
 from mint_synth.harness.session import HarnessSession, case_from_task
 from mint_synth.trace_proxy import TraceProxyConfig, TraceProxyServer
 
-from .base import ModelSettings, RuntimeResult, RuntimeSettings
+from .base import ModelSettings, RuntimeResult, RuntimeSettings, runtime_for_retrieval
 from .bridge import FinanceToolBridge
 from .trajectory import normalized_sample
 from .model_trace import load_model_turns
@@ -38,11 +38,14 @@ def collect_runtime(
     accepted = False
     sample = None
     try:
+        runtime = runtime_for_retrieval(runtime, config.get("harness", {}).get("retrieval"))
         case = case_from_task(task, index_path, cutoff=str(config["run"]["cutoff"]),
-                              available_at_field=str(config["input"]["available_at_field"]))
+                              available_at_field=str(config["input"]["available_at_field"]),
+                              retrieval=config.get("harness", {}).get("retrieval"), archive_path=trace_dir / "sources")
         training = config["training"]
         claude_native = runtime.name == "claude_code" and runtime.native_tools
-        context = nullcontext(case) if runtime.native_tools else FinanceToolBridge(lambda: HarnessSession(
+        from .research_bridge import ResearchBridge
+        context = (ResearchBridge(case, factory=config.get("harness", {}).get("tool_registry")) if case.retrieval else nullcontext(case)) if runtime.native_tools else FinanceToolBridge(lambda: HarnessSession(
             case, registry=registry, max_steps=int(training["max_tool_steps"]) + 1,
             max_tool_calls=int(training["max_tool_steps"]),
             max_context_chars=int(training["max_context_chars"]),
@@ -50,8 +53,12 @@ def collect_runtime(
             solution_reviewer=verifier, sample_key=sample_key,
         ), call_timeout=min(model.timeout_seconds, runtime.timeout_seconds), defer_review=verifier is not None)
         with context as bridge:
+            search_router = None
+            if runtime.native_tools and case.retrieval.get("mode") == "web" and case.retrieval.get("web", {}).get("search_endpoint"):
+                from .search_router import NativeSearchRouter
+                search_router = NativeSearchRouter(case, runtime, trace_dir, tools=bridge.tools, lock=bridge.lock)
             proxy = TraceProxyServer(TraceProxyConfig(upstream=model.origin, output_dir=trace_dir / "model",
-                                                     run_id=run_id, port=0))
+                                                     run_id=run_id, port=0), request_router=search_router)
             thread = threading.Thread(target=proxy.serve_forever, daemon=True)
             thread.start()
             try:
@@ -72,6 +79,9 @@ def collect_runtime(
                     result = RuntimeResult("failed", "model capture was still active when the agent ended", result.metadata)
                 proxy.server_close()
                 thread.join(timeout=5)
+                if search_router is not None:
+                    result.metadata["search_backend"] = dict(search_router.record)
+                    search_router.close()
             if runtime.native_tools:
                 if result.status == "completed":
                     if claude_native:

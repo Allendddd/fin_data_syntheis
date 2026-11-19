@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 import shutil
 import uuid
@@ -33,6 +34,7 @@ STAGE_ORDER = (
     "atomic",
     "entity_resolution",
     "repartition",
+    "seed_prepare",
     "graph_planning",
     "query_realization",
     "validation",
@@ -72,7 +74,9 @@ def _stage_plan(config: Mapping[str, Any], normalize_count: int) -> list[dict[st
         add("entity_resolution", entity_resolution_buckets, ["facts"])
         add("repartition", entity_buckets, ["entity_resolution"])
     if stages.get("graph_planning"):
-        add("graph_planning", entity_buckets, ["repartition"])
+        if config.get("version") == 3:
+            add("seed_prepare", 1, [])
+        add("graph_planning", entity_buckets, ["repartition", "seed_prepare"] if config.get("version") == 3 else ["repartition"])
     if stages.get("query_realization"):
         add("query_realization", entity_buckets, ["graph_planning"])
     if stages.get("validation"):
@@ -89,13 +93,14 @@ def _stage_plan(config: Mapping[str, Any], normalize_count: int) -> list[dict[st
         query_export = config.get("query_export", {}).get("enabled", True)
         sft_enabled = config["training"]["enabled"]
         long_sft = sft_enabled and config["training"]["long_enabled"]
-        if query_export or long_sft:
+        external_resources = bool(config.get("harness", {}).get("retrieval"))
+        if (query_export or long_sft) and not external_resources:
             add("corpus_index", 1, ["facts"])
             add("retrieval_index", entity_buckets, ["corpus_index", "repartition"])
         if query_export:
-            add("query_export", 1, ["validation", "retrieval_index"])
+            add("query_export", 1, ["validation"] if external_resources else ["validation", "retrieval_index"])
         if sft_enabled:
-            dependencies = ["validation", "retrieval_index"] if long_sft else ["validation"]
+            dependencies = ["validation", "retrieval_index"] if long_sft and not external_resources else ["validation"]
             add("sft_prepare", next(int(stage["shard_count"]) for stage in active if stage["name"] == "validation"), dependencies)
     if stages.get("export"):
         dependencies = ["validation"]
@@ -112,6 +117,7 @@ def _planned_signatures(
     run_fingerprint: str,
     stages: list[dict[str, Any]],
     assignments: list[list[Any]],
+    *, task_fingerprint: str | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     signatures: dict[str, list[str]] = {}
     aggregates: dict[str, str] = {}
@@ -127,7 +133,9 @@ def _planned_signatures(
             )
             stage_values.append(
                 stage_signature(
-                    run_fingerprint=run_fingerprint,
+                    run_fingerprint=task_fingerprint if task_fingerprint and name in {
+                        "normalize", "id_validation", "dedup", "facts", "atomic", "entity_resolution", "repartition",
+                        "seed_prepare", "graph_planning", "query_realization", "validation"} else run_fingerprint,
                     stage=name,
                     shard_id=shard_id,
                     assignment=assignment,
@@ -137,6 +145,21 @@ def _planned_signatures(
         signatures[name] = stage_values
         aggregates[name] = json_fingerprint(stage_values)
     return signatures, aggregates
+
+
+def _task_config_fingerprint(config):
+    task_config = copy.deepcopy(config)
+    task_config.pop("harness", None)
+    training = task_config.get("training", {})
+    task_config["training"] = {key: training[key] for key in
+        ("seed_fallback", "seed_ids", "objective_types", "formula_ids", "capabilities", "financial_topics", "split_validation_fraction")
+        if key in training}
+    llm = task_config.get("llm", {})
+    if "roles" in llm:
+        llm["roles"] = {key: value for key, value in llm["roles"].items() if key in {"extractor", "constructor", "auditor", "entity_resolver"}}
+        endpoints = {role["endpoint"] for role in llm["roles"].values()}
+        llm["endpoints"] = {key: value for key, value in llm.get("endpoints", {}).items() if key in endpoints}
+    return config_fingerprint(task_config)
 
 
 def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
@@ -160,7 +183,7 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
         seed_ids.add(seed_id)
         template = seed.get("task_spec_template")
         if not isinstance(template, dict):
-            raise ValueError(f"seed {seed.get('seed_id', index)!r} requires task_spec_template")
+            continue  # Query-only seeds are compiled once by seed_prepare, not at read-only preflight.
         if template.get("objective_type") not in objectives:
             raise ValueError(f"seed {seed.get('seed_id', index)!r} has an unsupported objective_type")
         for field in ("reasoning_form", "requested_output"):
@@ -173,7 +196,7 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
             raise ValueError(f"seed {seed.get('seed_id', index)!r} requires boolean time_sensitive")
     if config.get("version") == 3:
         training = config["training"]
-        load_tool_registry(config.get("harness", {}).get("tool_registry"))
+        load_tool_registry(config.get("harness", {}).get("tool_registry"), retrieval=config.get("harness", {}).get("retrieval"))
         long_requested = config.get("query_export", {}).get("enabled", True) or (
             training["enabled"] and training["long_enabled"]
         )
@@ -184,13 +207,13 @@ def _validate_auxiliary_inputs(config: Mapping[str, Any]) -> dict[str, int]:
         if missing_formulas:
             raise ValueError(f"training.formula_ids contains unknown formulas: {sorted(missing_formulas)}")
         selected_seeds = [seed for seed in seeds if not training["seed_ids"] or seed["seed_id"] in training["seed_ids"]]
-        selected_seeds = [seed for seed in selected_seeds if not training["objective_types"] or seed["task_spec_template"]["objective_type"] in training["objective_types"]]
+        selected_seeds = [seed for seed in selected_seeds if not training["objective_types"] or not isinstance(seed.get("task_spec_template"), dict) or seed["task_spec_template"]["objective_type"] in training["objective_types"]]
         if long_requested and not selected_seeds:
             raise ValueError("no long-horizon seed remains after training selectors")
         usable_formulas = [formula for formula in enabled_formulas
                            if not training["formula_ids"] or formula.formula_id in training["formula_ids"]]
-        matched = [formulas_for_seed(seed, usable_formulas) for seed in selected_seeds]
-        if long_requested and not any(matched):
+        matched = [formulas_for_seed(seed, usable_formulas) for seed in selected_seeds if isinstance(seed.get("task_spec_template"), dict)]
+        if long_requested and len(matched) == len(selected_seeds) and not any(matched):
             raise ValueError("selected long-horizon seeds have no enabled matching formula and fact roles")
     evaluation = load_evaluation_questions(
         config["quality"].get("evaluation_file"),
@@ -224,7 +247,10 @@ def create_plan(config_path: str | Path) -> RunLayout:
     combined = config_fingerprint(fingerprint_parts)
     assignments = pack_segments(segments, int(config["reader"]["normalize_target_bytes"]))
     stage_plan = _stage_plan(config, len(assignments))
-    stage_signatures, stage_aggregates = _planned_signatures(combined, stage_plan, assignments)
+    task_fingerprint = json_fingerprint({"config": _task_config_fingerprint(config), "input": input_fingerprint,
+        "code": code_fingerprint, "auxiliary": {key: value for key, value in auxiliary.items()
+            if key not in {"harness_tool_registry", "retrieval_resources"}}}) if config["version"] == 3 else None
+    stage_signatures, stage_aggregates = _planned_signatures(combined, stage_plan, assignments, task_fingerprint=task_fingerprint)
     run_id = _run_id(str(config["run"]["name"]), combined)
     runs_root = Path(config["output"]["root"]) / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -237,6 +263,7 @@ def create_plan(config_path: str | Path) -> RunLayout:
         "run_id": run_id,
         "created_at": utc_now(),
         "run_fingerprint": combined,
+        "task_fingerprint": task_fingerprint,
         "config_fingerprint": cfg_fingerprint,
         "input_fingerprint": input_fingerprint,
         "code_fingerprint": code_fingerprint,

@@ -123,6 +123,10 @@ def shard_complete(layout: RunLayout, stage: str, shard_id: int, signature: str 
         try:
             if artifact.stat().st_size != expected_size:
                 return False
+            if file_info.get("sha256"):
+                from .provenance import sha256_file
+                if sha256_file(artifact) != file_info["sha256"]:
+                    return False
         except OSError:
             return False
     return True
@@ -176,7 +180,11 @@ class ShardTransaction(AbstractContextManager["ShardTransaction"]):
         files = []
         for path in sorted(self.temporary.rglob("*")):
             if path.is_file():
-                files.append({"path": path.relative_to(self.temporary).as_posix(), "bytes": path.stat().st_size})
+                entry = {"path": path.relative_to(self.temporary).as_posix(), "bytes": path.stat().st_size}
+                if self.stage == "validation" and path.name == "tasks.parquet":
+                    from .provenance import sha256_file
+                    entry["sha256"] = sha256_file(path)
+                files.append(entry)
         atomic_json(
             self.temporary / "_SUCCESS.json",
             {

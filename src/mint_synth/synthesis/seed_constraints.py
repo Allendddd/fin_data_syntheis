@@ -33,6 +33,11 @@ def _words(value: Any) -> str:
 
 
 def _form_generator(template: Mapping[str, Any]) -> str | None:
+    if template.get("generator") in OBJECTIVE_BY_GENERATOR:
+        generator = str(template["generator"])
+        if OBJECTIVE_BY_GENERATOR[generator] != template.get("objective_type"):
+            raise ValueError("seed generator contradicts objective_type")
+        return generator
     form = _words(template.get("reasoning_form"))
     objective = template.get("objective_type")
     if objective == "comparison":
@@ -63,7 +68,7 @@ def formulas_for_seed(seed: Mapping[str, Any], formulas: Sequence[FormulaSpec]) 
         raise ValueError(f"seed {seed['seed_id']!r} has unsupported reasoning_form")
     required = [_words(role) for role in template["required_fact_roles"]]
     allowed = _ROLE_SETS[generator]
-    if len(required) != len(allowed) or any(role not in aliases for role, aliases in zip(required, allowed)):
+    if not template.get("generator") and (len(required) != len(allowed) or any(role not in aliases for role, aliases in zip(required, allowed))):
         raise ValueError(f"seed {seed['seed_id']!r} has unsupported required_fact_roles for {generator}")
     matches = tuple(formula for formula in formulas if formula.generator == generator)
     if not matches and seed.get("origin") != "built_in_approximation":

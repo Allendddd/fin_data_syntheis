@@ -182,9 +182,48 @@ def default_tool_registry() -> ToolRegistry:
     return registry
 
 
-def load_tool_registry(factory: str | None = None) -> ToolRegistry:
+def resource_tool_registry(mode: str, *, enable_web_adapter: bool = True) -> ToolRegistry:
+    from mint_synth.harness.resources import source_observations
+    registry = ToolRegistry()
+    if mode == "web" and not enable_web_adapter:
+        return registry  # Native harness tools remain available; this is only an optional adapter.
+    def definition(name, description, properties, required):
+        return {"type": "function", "function": {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}}}
+    text = {"type": "string", "minLength": 1}
+    limit = {"type": "integer", "minimum": 1, "maximum": 10}
+    span = {"unit": {"type": "integer", "minimum": 1}, "char_start": {"type": "integer", "minimum": 0},
+            "max_chars": {"type": "integer", "minimum": 100, "maximum": 16000}}
+    if mode == "static":
+        definitions = [definition("search_documents", "Search original documents; returns original-file locators and excerpts.",
+                                 {"query": text, "limit": limit}, ["query"]),
+                       definition("read_document", "Read an original PDF page, DOCX block or text document. Units are one-based.",
+                                  {"document_id": text, **span}, ["document_id"])]
+    elif mode == "web":
+        definitions = [definition("search_web", "Search the live web. Source dates must respect the task cutoff.",
+                                 {"query": text, "limit": limit}, ["query"]),
+                       definition("read_web", "Fetch and read a web page or PDF; only returned text is acquired evidence.",
+                                  {"url": text, **span}, ["url"])]
+    else:
+        raise ValueError("unknown retrieval mode")
+    def distill(_tools, _args, observation):
+        return [{"kind": "source_chunk", "chunk_id": item["chunk_id"], "source_id": item["source_id"],
+                 "available_at": item["available_at"], "excerpt": item["text"][:300]}
+                for item in source_observations(observation)]
+    for item in definitions:
+        name = item["function"]["name"]
+        registry.register(ToolSpec(name, "1", item, lambda tools, args, n=name: tools.call(n, args),
+                                  relevance=lambda _task, _args, obs: bool(source_observations(obs)), distill=distill))
+    calculate = next(item for item in TOOL_DEFINITIONS if item["function"]["name"] == "calculate")
+    registry.register(ToolSpec("calculate", "1", calculate, lambda tools, args: tools.call("calculate", args),
+                              relevance=lambda *_args: True))
+    return registry
+
+
+def load_tool_registry(factory: str | None = None, *, retrieval: Mapping[str, Any] | None = None,
+                       native_resources: bool = False) -> ToolRegistry:
     """Load a user factory named ``package.module:register_tools``."""
-    registry = default_tool_registry()
+    registry = resource_tool_registry(str(retrieval["mode"]), enable_web_adapter=not native_resources and bool(retrieval.get("web", {}).get("search_endpoint"))) if retrieval else default_tool_registry()
     if not factory:
         return registry
     module_name, separator, function_name = factory.partition(":")

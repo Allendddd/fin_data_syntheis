@@ -58,6 +58,11 @@ def auxiliary_fingerprints(config: Mapping[str, Any]) -> dict[str, dict[str, Any
         }
     if config.get("version") == 3:
         harness = config.get("harness", {})
+        retrieval = harness.get("retrieval")
+        if retrieval and config.get("training", {}).get("enabled") and config.get("training", {}).get("long_enabled"):
+            from mint_synth.harness.resources import validate_retrieval, resource_fingerprint
+            validate_retrieval(retrieval)
+            result["retrieval_resources"] = {"mode": retrieval["mode"], "fingerprint": resource_fingerprint(retrieval)}
         factory = harness.get("tool_registry")
         resources = harness.get("resource_paths", [])
         plugin: dict[str, Any] = {"factory": factory, "files": []}

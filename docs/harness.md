@@ -2,6 +2,8 @@
 
 本项目的 harness 是有状态的执行环境，可用于强模型的 SFT 轨迹采集，也可由项目外的 OPD 训练器驱动学生 rollout。它负责冻结语料工具、动作门控、上下文装配、证据账本、状态恢复和私有校验；学生策略、关键步骤选择、优势计算和参数更新不在本项目中。
 
+默认执行框架为 Codex，其他 harness 继续可配置；公共任务与审核契约独立于框架。新 `harness.retrieval` 选择原始文档 static 或真实联网 web，不依赖上游分块索引。下文的分块工具示例属于旧配置兼容路径；新资源与冻结任务重新采集参见[资源与重新采集](retrieval-and-collection.md)。
+
 设计依据是 [Mint-Agent 论文第 4 节与第 5.2 节](https://arxiv.org/html/2608.16386)：模型只看到 query、允许的动作、预算、裁剪后的工作状态和工具观察；隐藏答案图与来源包由 harness 的校验端保管。教师先在环境里执行 query，合格轨迹才进入 SFT；OPD 从失败轨迹的动作前状态继续采样。这里实现公开方法的工程契约，不声称复制论文未公开的内部提示词或评判器。
 
 ## 数据边界与入口
@@ -13,15 +15,16 @@ from mint_synth.harness import HarnessSession, iter_cases, load_tool_registry
 from mint_synth.core.config_v2 import load_config
 from mint_synth.inference.runtime import client_for_role
 
-case = next(iter_cases("/path/to/outputs/runs/<run_id>", split="train"))
-registry = load_tool_registry()  # 配置了自定义工具时填入 package.module:register_tools
+case = next(iter_cases("/path/to/outputs/runs/<run_id>", split="train", archive_root="/path/to/private-traces"))
+registry = load_tool_registry(retrieval=case.retrieval)  # 可额外提供已配置的工具 factory
 
 reviewer = client_for_role(load_config("/path/to/config.yaml"), "auditor")  # 仅环境侧使用
 with HarnessSession(case, registry=registry, max_steps=17, max_tool_calls=16,
                     solution_reviewer=reviewer) as session:
     visible = session.observe()
     pre_action = session.checkpoint()
-    result = session.step({"tool": "search_corpus", "arguments": {"query": "营业收入"}})
+    search = {"static": "search_documents", "web": "search_web"}.get(case.retrieval.get("mode"), "search_corpus")
+    result = session.step({"tool": search, "arguments": {"query": "营业收入"}})
     visible = session.observe()
     # 后续由调用方提供动作；结束动作是 {"final": "<实际自然语言金融推导和答案>"}。
     # episode 结束后，环境进程才调用 session.grade() 取得私有校验结果。

@@ -97,8 +97,15 @@ async def _daemon_call(function: Callable, *args: Any) -> Any:
 
 
 def run_strands(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path) -> RuntimeResult:
+    from .base import runtime_for_retrieval
+    settings = runtime_for_retrieval(settings, getattr(getattr(bridge, "case", bridge), "retrieval", None))
     if getattr(getattr(settings, "strands", None), "mode", "finance") == "native":
         from .strands_native import run_strands_native
+        if hasattr(bridge, "case") and bridge.case.retrieval and bridge.tool_definitions:
+            from .mcp_server import FinanceMCPServer
+            with FinanceMCPServer(bridge) as server:
+                return run_strands_native(bridge, model, settings, trace_dir,
+                    resource_server={"url": server.url, "token": server.token, "definitions": bridge.tool_definitions})
         return run_strands_native(bridge, model, settings, trace_dir)
     recorder = _Recorder(Path(trace_dir))
     shared: dict[str, Any] = {"messages": [], "submitted_final": False, "environment_done": False}

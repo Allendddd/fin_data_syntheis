@@ -10,15 +10,15 @@
 
 同一实体中，多个种子若编译出相同的公式集合与时间过滤条件，只执行一次规则图规划；各个种子仍分别检查候选及其发布约束。分片指标 `planner_cache_hits` 记录避免的重复规划次数。
 
-自定义种子通过 `query_realization.seed_file` 指向 JSONL，每条提供实体无关的任务规格模板：
+自定义种子通过 `query_realization.seed_file` 指向 JSONL，每条只需 query。`seed_prepare` 在图规划前统一解析、去重并持久化内部任务规格；仍兼容已有显式模板。
 
 ```json
-{"seed_id":"margin-change","seed_query":"比较同一主体两个期间的指标变化。","task_spec_template":{"objective_type":"change","reasoning_form":"retrieve compatible values for two periods and compute change","required_fact_roles":["new-period value","old-period value"],"time_sensitive":false,"requested_output":"direction and magnitude of change"}}
+{"query":"比较同一主体两个期间的营业收入变化，并核对披露口径。"}
 ```
 
 ## 长程 query 与教师轨迹
 
-`corpus_index` 冻结本地文本分块，`retrieval_index` 按规范化实体桶建立 SQLite FTS5 检索分区。`query_export` 读取验证通过的长任务，输出纯 query 与独立的隐藏校验文件。它依赖验证与检索索引，不依赖 `sft_prepare`。因此教师 rollout 没有被接纳时，已完成的 query 仍可从 query 阶段取得；格式见 [长程 query 文档](opd.md)。
+配置 `harness.retrieval` 后，`query_export` 和 `sft_prepare` 只依赖已验证任务，不再依赖 `corpus_index/retrieval_index`；资源入口另行选择原始文档或 web。未配置 retrieval 的旧配置保留原 SQLite 分块路径，仅用于兼容。`query_export` 输出纯 query 与独立隐藏校验文件，不依赖教师轨迹成功。冻结任务重新采集和来源对应规则见[资源与重新采集](retrieval-and-collection.md)。
 
 启用 `training.enabled` 后，`sft_prepare` 按验证任务分片运行。原子教师只接收 context 与 question，各采样 `atomic_samples_per_task: 2` 次自然语言推导和答案；不规定 proof JSON、逐字引用、结束标记或参考图路径。真实可见 CoT 与 content 进入监督目标，完整 exchange 和原始字段留在审计记录中。
 
@@ -66,6 +66,6 @@ Strands、Codex、Claude Code 的 `mode: native` 与项目自有 JSON action `de
 
 每个教师候选增加一次审核，多合格候选另加 judge，参考 r 另做一次复核；长程一次审核同时给出动作贡献。审核 JSON、候选图和评委输出只进私有记录。
 
-原生格式升级到 claude_code_native_v2、codex_native_v2、strands_native_v2。CC 消费 target_block_loss_mask；Codex 消费 target_output_loss_mask 和 target_reasoning_text_fields（encrypted_content=false）；Strands 同时消费 target_text_loss 和按调用 ID 的 target_tool_call_loss_mask。训练端必须应用这些字段，不能按 v1 假设整轮 loss=true。输入和观察不训练，可见推理/摘要按来源保留，opaque/redacted 内容只留档。
+原生格式升级到 claude_code_native_v2、codex_native_v2、strands_native_v2。CC 消费 target_block_loss_mask；Codex 消费 target_output_loss_mask 和 target_reasoning_text_fields（encrypted_content=false）；web 下还共同应用 CC 的 target_block_field_loss_mask 或 Codex 的 target_output_field_loss_mask，排除托管工具观察与引用元数据。点分路径表示嵌套字段。Strands 同时消费 target_text_loss 和按调用 ID 的 target_tool_call_loss_mask。训练端必须应用这些字段，不能按 v1 假设整轮 loss=true。输入和观察不训练，可见推理/摘要按来源保留，opaque/redacted 内容只留档。
 
 代码、prompt 和格式变化后需要新 plan/run-dir，不能绕过指纹续跑旧计划。目标 GPU、SDK/CLI 和训练模板的真实 token labels 仍须在目标环境验收。

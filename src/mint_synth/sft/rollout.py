@@ -23,7 +23,8 @@ def long_rollout(
             raise ValueError("external teacher runtimes require model settings and a trace directory")
         from mint_synth.agents.collector import collect_runtime
 
-        tools = registry if runtime.native_tools else registry or default_tool_registry()
+        from mint_synth.harness.registry import load_tool_registry
+        tools = registry if runtime.native_tools else registry or load_tool_registry(retrieval=config.get("harness", {}).get("retrieval"))
         return collect_runtime(task, index_path, config, tools,
                                model=model, runtime=runtime, trace_dir=trace_dir, sample_key=sample_key, verifier=verifier)
     try:
@@ -58,13 +59,15 @@ def _native_rollout(
     cutoff = str(config["run"]["cutoff"])
     available_at_field = str(config["input"]["available_at_field"])
     try:
-        case = case_from_task(task, index_path, cutoff=cutoff, available_at_field=available_at_field)
+        case = case_from_task(task, index_path, cutoff=cutoff, available_at_field=available_at_field,
+                              retrieval=config.get("harness", {}).get("retrieval"),
+                              archive_path=trace_dir / "sources" if trace_dir is not None else None)
     except ValueError as exc:
         return None, str(exc)
     if trace_dir is not None:
         trace_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     with HarnessSession(
-        case, registry=registry or default_tool_registry(),
+        case, registry=registry,
         max_steps=int(training["max_tool_steps"]) + 1,
         max_tool_calls=int(training["max_tool_steps"]),
         max_context_chars=int(training["max_context_chars"]),

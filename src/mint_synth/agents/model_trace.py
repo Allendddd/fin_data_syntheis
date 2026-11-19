@@ -253,6 +253,8 @@ def iter_captured_calls(trace_dir: Path) -> Iterator[dict[str, Any]]:
     records = []
     for path in calls.glob("*.json"):
         metadata = json.loads(path.read_text(encoding="utf-8"))
+        if metadata.get("capture_kind") == "search_backend":
+            continue  # Native search-service RPCs are observations, not teacher predictions.
         target = metadata.get("request", {}).get("target", "").split("?", 1)[0].rstrip("/")
         protocol = next((value for suffix, value in (("/chat/completions", "chat_completions"),
                         ("/responses", "responses"), ("/messages", "anthropic")) if target.endswith(suffix)), None)

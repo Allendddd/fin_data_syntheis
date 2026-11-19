@@ -256,7 +256,7 @@ class TeacherProofTests(unittest.TestCase):
                     "llm_supplement": False},
         }
         with (patch("mint_synth.workflow.stages.questions.parquet_num_rows", return_value=2),
-              patch("mint_synth.workflow.stages.questions.load_seed_bank", return_value=[seed]),
+              patch("mint_synth.workflow.stages.questions.prepared_seeds", return_value=[seed]),
               patch("mint_synth.workflow.stages.questions._grouped_payloads",
                     return_value=iter([("entity", [dated, undated])])),
               patch("mint_synth.workflow.stages.questions.RuleDagPlanner", Planner),
@@ -303,7 +303,7 @@ class TeacherProofTests(unittest.TestCase):
                           "llm_supplement": False}}
         fact = {"fact_id": "f", "source_metadata": {"published_at": "2024-01-01"}}
         with (patch("mint_synth.workflow.stages.questions.parquet_num_rows", return_value=1),
-              patch("mint_synth.workflow.stages.questions.load_seed_bank", return_value=[first, second]),
+              patch("mint_synth.workflow.stages.questions.prepared_seeds", return_value=[first, second]),
               patch("mint_synth.workflow.stages.questions._grouped_payloads", return_value=iter([("entity", [fact])])),
               patch("mint_synth.workflow.stages.questions.RuleDagPlanner", Planner),
               patch("mint_synth.workflow.stages.questions._envelope_writer", return_value=Writer()),

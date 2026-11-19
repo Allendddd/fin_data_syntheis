@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -114,8 +114,9 @@ class TraceProxyConfig:
 class TraceProxyServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, config: TraceProxyConfig):
+    def __init__(self, config: TraceProxyConfig, *, request_router=None):
         self.config = config
+        self.request_router = request_router
         self._activity = threading.Condition()
         self._inflight = 0
         self._capture_lock = threading.RLock()
@@ -199,6 +200,12 @@ class TraceProxyServer(ThreadingHTTPServer):
 class TraceProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server: TraceProxyServer
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            self.close_connection = True
 
     def log_message(self, _format: str, *_args: object) -> None:
         # Request URLs and headers can carry credentials; the trace files are private.
@@ -367,12 +374,29 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
         response_bytes = 0
         response_sha = hashlib.sha256()
         try:
-            with self.server.client.stream(
-                self.command,
-                f"{self.server.config.upstream}{target}",
-                headers=forwarded,
-                content=body,
-            ) as upstream:
+            routed = None
+            if self.server.request_router is not None:
+                from mint_synth.agents.search_router import SearchRoutingError
+                try:
+                    routed = self.server.request_router.handle(self.command, target, body, call_id=call_id)
+                except SearchRoutingError as exc:
+                    metadata.update(state="request_rejected", finished_at=_now(), error=str(exc))
+                    self.server.capture_json(metadata_path, metadata)
+                    self._send_error_json(400, str(exc), call_id)
+                    return
+            if routed is not None:
+                metadata["capture_kind"] = "search_backend"
+                metadata["search_backend"] = dict(self.server.request_router.record)
+                upstream_context = nullcontext(httpx.Response(routed.status, content=routed.body,
+                    headers={"content-type": routed.content_type}))
+            else:
+                upstream_context = self.server.client.stream(
+                    self.command,
+                    f"{self.server.config.upstream}{target}",
+                    headers=forwarded,
+                    content=body,
+                )
+            with upstream_context as upstream:
                 upstream_headers = list(upstream.headers.multi_items())
                 has_body = self.command != "HEAD" and upstream.status_code not in {204, 304} and not 100 <= upstream.status_code < 200
                 metadata["response"] = {
@@ -398,7 +422,7 @@ class TraceProxyHandler(BaseHTTPRequestHandler):
                     chunk_descriptor = self.server.capture_open(chunks_path)
                     chunks_file = stack.enter_context(os.fdopen(chunk_descriptor, "w", encoding="utf-8"))
                     if has_body:
-                        for chunk in upstream.iter_raw():
+                        for chunk in ([upstream.content] if routed is not None else upstream.iter_raw()):
                             if not chunk:
                                 continue
                             offset = response_bytes

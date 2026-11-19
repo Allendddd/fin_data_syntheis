@@ -76,6 +76,14 @@ class _MCPHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server: FinanceMCPServer
 
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            # CLI shutdown/cancellation may reset an otherwise valid keepalive
+            # connection. This is not a source-tool or financial-audit failure.
+            self.close_connection = True
+
     def setup(self) -> None:
         super().setup()
         self.connection.settimeout(30)

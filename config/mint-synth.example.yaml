@@ -18,7 +18,7 @@ input:
   max_jsonl_line_bytes: 67108864
   id_field: null
   available_at_field: published_at
-  metadata_fields: [title, published_at, url, ticker, lei, cik]
+  metadata_fields: [title, published_at, url, ticker, lei, cik, document_id, original_path, document_sha256]
   invalid_record_policy: quarantine
 
 output:
@@ -64,6 +64,17 @@ atomic: {enabled: true, tasks_per_chunk: 2, language: auto}
 query_realization: {seed_file: null, language: auto, max_question_chars: 1000}
 query_export: {enabled: true, min_train_queries: 1}
 
+harness:
+  retrieval:
+    mode: static                 # static | web; independent of the selected harness
+    corpus_path: ../originals     # set this to your original PDF/DOCX/etc. directory
+    manifest_path: null           # optional JSONL source identity metadata, not a required cross-corpus mapping
+    web:
+      search_endpoint: null      # null: native backend; URL: bind the harness search entry point to this backend
+      search_protocol: tavily    # tavily | json; HTTP protocol expected by the configured search service
+      api_key_env: null          # e.g. TAVILY_API_KEY; credentials are only sent to the search backend
+      timeout_seconds: 45
+
 training:
   enabled: true
   atomic_enabled: true
@@ -80,20 +91,23 @@ training:
   long_teacher_roles: [teacher]
   long_verifier_role: auditor
   agent_runtime:
-    default: native             # native | strands | codex | claude_code
+    default: codex              # codex | strands | claude_code | native (legacy project action loop)
     by_role: {}                  # e.g. {teacher: strands}; roles may use different runtimes
     commands: {}                 # e.g. {codex: [/opt/codex/bin/codex], claude_code: [/opt/bin/claude]}
     timeout_seconds: 600
     codex:
-      mode: finance             # native enables Codex built-in tools with corpus files and offline grading, without MCP
+      mode: finance             # web automatically uses native tools; static/legacy retain this choice
       sandbox: workspace-write  # native mode: workspace-write | read-only
     strands:
-      mode: finance             # native uses the official strands_tools package, without financial tool wrappers
-      tools: [file_read, shell]  # native only; optional file_write / python_repl
+      mode: finance             # web automatically uses native tools; static/legacy retain this choice
+      tools: [file_read, shell]  # native tools: strands_tools module names or custom dotted Python modules
+      search_tool: web_search   # backend binding: replace this SDK tool's executor; default slot is created if absent
+      search_query_field: query # query parameter in the selected SDK tool's original schema
+      search_limit_field: limit
     claude_code:
-      mode: finance             # finance | native; native uses ONLY CC built-ins, corpus files and offline grading, without MCP
+      mode: finance             # web automatically uses native tools; static/legacy retain this choice
       tools: [default]          # native mode only; [] disables built-in tools
-      allowed_tools: []        # native mode only; e.g. [Read, "Bash(rg *)", "Bash(cat *)", "Bash(python3 *)"]
+      allowed_tools: []        # optional user permission rules; web adds no project whitelist or denylist
   rollouts_per_task: 2
   max_tool_steps: 16
   max_context_chars: 24000

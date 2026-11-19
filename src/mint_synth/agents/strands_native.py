@@ -19,11 +19,8 @@ from typing import Any
 
 from mint_synth.core.run_state import atomic_json
 
-from .base import ModelSettings, RuntimeResult, RuntimeSettings
+from .base import ModelSettings, RuntimeResult, RuntimeSettings, StrandsSettings
 from .cc_workspace import finish_workspace, prepare_workspace
-
-
-NATIVE_TOOLS = frozenset({"file_read", "file_write", "shell", "python_repl"})
 
 
 def _private_output(path: Path):
@@ -71,7 +68,7 @@ def _terminate_worker(process: subprocess.Popen) -> None:
                 pass
 
 
-def run_strands_native(case: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path) -> RuntimeResult:
+def run_strands_native(case: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path, *, resource_server=None) -> RuntimeResult:
     """Materialize public source files and let Strands finish in its own loop."""
     if settings.command or settings.extra_args:
         raise ValueError("command and extra_args are only supported by CLI runtimes")
@@ -81,8 +78,7 @@ def run_strands_native(case: Any, model: ModelSettings, settings: RuntimeSetting
         raise ValueError("model timeout must be finite and positive")
     model.origin
     tools = tuple(settings.strands.tools)
-    if not tools or len(set(tools)) != len(tools) or any(name not in NATIVE_TOOLS for name in tools):
-        raise ValueError("Strands native tools must be unique supported official tool names")
+    StrandsSettings(mode="native", tools=tools)
     trace_dir = Path(trace_dir).resolve()
     trace_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name == "posix":
@@ -100,17 +96,24 @@ def run_strands_native(case: Any, model: ModelSettings, settings: RuntimeSetting
             workspace = home / "workspace"
             workspace.mkdir(mode=0o700)
             prompt = prepare_workspace(case, workspace, trace_dir, runtime="strands")
-            environment = _environment(home, model)
+            actual_case = getattr(case, "case", case)
+            environment = _environment(home, model, inherit_tools=getattr(actual_case, "retrieval", {}).get("mode") == "web")
             # These settings belong only to the isolated worker process. The
             # selected tools are explicitly enabled for unattended synthesis.
             environment.update({"STRANDS_NON_INTERACTIVE": "true", "BYPASS_TOOL_CONSENT": "true",
                                 "SHELL_DEFAULT_TIMEOUT": str(max(1, int(min(model.timeout_seconds, settings.timeout_seconds))))})
             package_root = str(Path(__file__).resolve().parents[2])
             environment["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, environment.get("PYTHONPATH"))))
-            payload = {"trace_dir": str(trace_dir), "prompt": prompt, "tools": list(tools),
+            payload = {"trace_dir": str(trace_dir), "prompt": prompt, "tools": list(tools), "resource_server": resource_server,
                        "model": {"model": model.model, "base_url": model.origin + "/v1",
                                  "temperature": model.temperature, "max_tokens": model.max_tokens,
                                  "timeout_seconds": model.timeout_seconds}}
+            retrieval = getattr(actual_case, "retrieval", {})
+            if retrieval.get("mode") == "web" and retrieval.get("web", {}).get("search_endpoint"):
+                payload["search_binding"] = {"url": model.origin + "/v1/mint/search",
+                    "tool": getattr(settings.strands, "search_tool", "web_search"),
+                    "query_field": getattr(settings.strands, "search_query_field", "query"),
+                    "limit_field": getattr(settings.strands, "search_limit_field", "limit")}
             try:
                 with _private_output(trace_dir / "worker.stdout.log") as stdout, _private_output(trace_dir / "worker.stderr.log") as stderr:
                     options = {"start_new_session": True} if os.name == "posix" else {

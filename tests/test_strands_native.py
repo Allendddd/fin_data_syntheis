@@ -262,7 +262,7 @@ class Agent:
     assert json.loads((trace / "agent.messages.json").read_text())[-1]["role"] == "assistant"
 
 
-@pytest.mark.parametrize("tools", [("mcp__finance__search_corpus",), ("file_read", "file_read"), (), ("load_tool",)])
-def test_parent_rejects_custom_or_ambiguous_tools(tmp_path, tools):
-    with pytest.raises(ValueError, match="official tool"):
+@pytest.mark.parametrize("tools", [("--invalid-tool",), ("file_read", "file_read"), (), ("invalid/module",)])
+def test_parent_rejects_invalid_or_ambiguous_tool_modules(tmp_path, tools):
+    with pytest.raises(ValueError, match="importable tool module"):
         run_strands_native("case", ModelSettings("local", "http://localhost/v1", None), settings(tools=tools), tmp_path)

@@ -352,8 +352,8 @@ def test_native_configuration_round_trip_and_finance_defaults(tmp_path, runtime)
     ("strands", {"mode": "typo"}),
     ("strands", {"mode": "native", "tools": []}),
     ("strands", {"mode": "native", "tools": ["file_read", "file_read"]}),
-    ("strands", {"mode": "native", "tools": ["unknown_tool"]}),
-    ("strands", {"mode": "native", "tools": ["mcp__finance__search_corpus"]}),
+    ("strands", {"mode": "native", "tools": ["--invalid-tool"]}),
+    ("strands", {"mode": "native", "tools": ["package/invalid"]}),
 ])
 def test_native_configuration_rejects_unsupported_modes_tools_and_bypass(tmp_path, runtime, options):
     configured = yaml.safe_load((Path(__file__).parents[1] / "config/mint-synth.example.yaml").read_text(encoding="utf-8"))

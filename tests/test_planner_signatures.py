@@ -61,7 +61,7 @@ class PlannerSignatureTests(unittest.TestCase):
         self.assertEqual(stages[1]["shard_count"], 3)
         self.assertEqual(stages[2]["dependencies"], ["normalize", "id_validation"])
 
-    def test_plan_preflight_rejects_unparsed_custom_seed(self) -> None:
+    def test_plan_preflight_accepts_query_only_seed_for_later_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             seed_path = Path(temp) / "seeds.jsonl"
             seed_path.write_text(json.dumps({"seed_id": "bad", "seed_query": "query"}) + "\n", encoding="utf-8")
@@ -75,8 +75,7 @@ class PlannerSignatureTests(unittest.TestCase):
                 "query_realization": {"seed_file": str(seed_path)},
                 "quality": {"evaluation_file": None, "max_evaluation_questions": 10},
             }
-            with self.assertRaisesRegex(ValueError, "task_spec_template"):
-                _validate_auxiliary_inputs(config)
+            self.assertEqual(_validate_auxiliary_inputs(config)["seeds"], 1)
 
 
 if __name__ == "__main__":

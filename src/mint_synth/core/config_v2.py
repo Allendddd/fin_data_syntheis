@@ -49,6 +49,24 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "tool_registry": {"type": ["string", "null"], "default": None},
                 "resource_paths": {"type": "array", "items": {"type": "string"},
                                    "uniqueItems": True, "default": []},
+                "retrieval": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["mode"],
+                    "properties": {
+                        "mode": {"enum": ["static", "web"]},
+                        "corpus_path": {"type": ["string", "null"], "default": None},
+                        "manifest_path": {"type": ["string", "null"], "default": None},
+                        "max_document_bytes": {"type": "integer", "minimum": 1024, "default": 33554432},
+                        "web": {"type": "object", "additionalProperties": False, "default": {},
+                            "properties": {
+                                "search_endpoint": {"type": ["string", "null"], "default": None},
+                                "search_protocol": {"enum": ["tavily", "json"], "default": "tavily"},
+                                "api_key_env": {"type": ["string", "null"], "default": None},
+                                "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 45},
+                                "version": {"type": "string", "default": "live"},
+                            }},
+                    },
+                },
             },
         }
         schema["properties"]["training"] = {
@@ -73,7 +91,7 @@ def _schema(version: int = 2) -> dict[str, Any]:
                 "agent_runtime": {
                     "type": "object", "additionalProperties": False, "default": {},
                     "properties": {
-                        "default": {"enum": ["native", "strands", "codex", "claude_code"], "default": "native"},
+                        "default": {"enum": ["native", "strands", "codex", "claude_code"], "default": "codex"},
                         "by_role": {"type": "object", "default": {},
                                     "additionalProperties": {"enum": ["native", "strands", "codex", "claude_code"]}},
                         "commands": {"type": "object", "default": {}, "additionalProperties": False,
@@ -92,9 +110,12 @@ def _schema(version: int = 2) -> dict[str, Any]:
                             "type": "object", "additionalProperties": False, "default": {},
                             "properties": {
                                 "mode": {"enum": ["finance", "native"], "default": "finance"},
+                                "search_tool": {"type": "string", "minLength": 1, "default": "web_search"},
+                                "search_query_field": {"type": "string", "minLength": 1, "default": "query"},
+                                "search_limit_field": {"type": "string", "minLength": 1, "default": "limit"},
                                 "tools": {"type": "array", "minItems": 1, "uniqueItems": True,
                                           "default": ["file_read", "shell"],
-                                          "items": {"enum": ["file_read", "file_write", "shell", "python_repl"]}},
+                                          "items": {"type": "string", "minLength": 1}},
                             },
                         },
                         "claude_code": {
@@ -107,11 +128,6 @@ def _schema(version: int = 2) -> dict[str, Any]:
                                 "allowed_tools": {"type": "array", "uniqueItems": True, "default": [],
                                                   "items": {"type": "string", "minLength": 1, "pattern": "^[^-\\s]"}},
                             },
-                            "allOf": [{"if": {"properties": {"mode": {"const": "native"}}, "required": ["mode"]},
-                                       "then": {"properties": {
-                                           "tools": {"items": {"pattern": "^(default|[A-Z][A-Za-z0-9_]*)$"}},
-                                           "allowed_tools": {"items": {"pattern": "^[A-Z][A-Za-z0-9_]*(\\([^\\r\\n]*\\))?$"}},
-                                       }}}],
                         },
                     },
                 },
@@ -185,6 +201,17 @@ def validate_cross_fields(config: Mapping[str, Any]) -> None:
         for role in training.get("agent_runtime", {}).get("by_role", {}):
             if role not in config.get("llm", {}).get("roles", {}):
                 raise ConfigError(f"training.agent_runtime.by_role references unknown LLM role: {role}")
+        for name in training.get("agent_runtime", {}).get("strands", {}).get("tools", []):
+            if not all(part.isidentifier() for part in name.split(".")):
+                raise ConfigError("training.agent_runtime.strands.tools must contain importable Python module names")
+        for field in ("search_tool", "search_query_field", "search_limit_field"):
+            if not training.get("agent_runtime", {}).get("strands", {}).get(field, "query").strip():
+                raise ConfigError("training.agent_runtime.strands." + field + " must be nonempty")
+        from mint_synth.agents.base import search_backend_contract
+        try:
+            search_backend_contract(config)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
         query_export = config.get("query_export", {})
         query_enabled = query_export.get("enabled", True)
         sft_enabled = training.get("enabled", True)
@@ -373,6 +400,10 @@ def resolve_paths(config: dict[str, Any], config_path: str | Path) -> dict[str, 
         harness["resource_paths"] = [
             _absolute(path, base) for path in harness.get("resource_paths", [])
         ]
+        retrieval = harness.get("retrieval", {})
+        for key in ("corpus_path", "manifest_path"):
+            if retrieval.get(key):
+                retrieval[key] = _absolute(retrieval[key], base)
     return resolved
 
 

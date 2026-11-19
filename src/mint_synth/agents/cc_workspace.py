@@ -27,6 +27,10 @@ def _digest(data: bytes) -> str:
 
 def prepare_workspace(case: HarnessCase, workspace: Path, trace_dir: Path, *, runtime: str = "claude_code") -> str:
     """Materialize every visible entity chunk, including unrelated evidence."""
+    if hasattr(case, "case"):
+        case = case.case
+    if case.retrieval:
+        return prepare_resource_workspace(case, workspace, trace_dir)
     workspace = workspace.resolve()
     corpus = workspace / "corpus"
     corpus.mkdir(mode=0o700)
@@ -72,6 +76,33 @@ def prepare_workspace(case: HarnessCase, workspace: Path, trace_dir: Path, *, ru
     )
 
 
+def prepare_resource_workspace(case, workspace, trace_dir):
+    from mint_synth.harness.resources import ResourceTools, resource_fingerprint
+    sources = []
+    with_tools = ResourceTools(case.retrieval, case.cutoff, entity_id=case.entity_id, dated_only=case.dated_only)
+    try:
+        for doc_id, doc in with_tools.documents.items():
+            sources.append({"document_id": doc_id, "file": str(doc["path"].resolve()), "sha256": doc["sha256"]})
+    finally:
+        with_tools.close()
+    public = {"mode": case.retrieval["mode"], "cutoff": case.cutoff, "sources": sources}
+    atomic_json(workspace / "corpus-manifest.json", public)
+    atomic_json(trace_dir / "native-workspace.json", {"format_version": 2, "workspace_root": str(workspace.resolve()),
+        "cutoff": case.cutoff, "sources": sources, "resource_fingerprint": resource_fingerprint(case.retrieval),
+        "retrieval": dict(case.retrieval),
+        "manifest_sha256": _digest((workspace / "corpus-manifest.json").read_bytes())})
+    if case.retrieval["mode"] == "web":
+        return (f"Question: {case.query}\nEvidence cutoff: {case.cutoff}. "
+            "Research this question using your available tools. No static corpus is attached. "
+            "Give the necessary financial reasoning "
+            "and final answer in your normal final reply.")
+    return (f"Question: {case.query}\nEvidence cutoff: {case.cutoff}. Retrieval mode: {case.retrieval['mode']}. "
+        "Use the configured research source tools to search and read original documents or live web sources, "
+        "and native tools for computation as needed. Only the chosen retrieval mode supplies financial evidence. "
+        f"The public original-file manifest is {workspace / 'corpus-manifest.json'}. "
+        "Keep original files unchanged. Give the necessary financial reasoning and final answer in your normal final reply.")
+
+
 def finish_workspace(workspace: Path, trace_dir: Path) -> None:
     """Check source integrity while the ephemeral workspace still exists."""
     manifest = json.loads((trace_dir / "native-workspace.json").read_text(encoding="utf-8"))
@@ -79,9 +110,10 @@ def finish_workspace(workspace: Path, trace_dir: Path) -> None:
     invalid = []
     for source in manifest["sources"]:
         path = root / source["file"]
-        if (path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root)
+        permitted_root = Path(manifest["retrieval"]["corpus_path"]).resolve() if manifest.get("format_version") == 2 else root
+        if (path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(permitted_root)
                 or _digest(path.read_bytes()) != source["sha256"]):
-            invalid.append(source["chunk_id"])
+            invalid.append(source.get("chunk_id", source.get("document_id")))
     public = root / "corpus-manifest.json"
     manifest_valid = (not public.is_symlink() and public.is_file()
                       and public.resolve().is_relative_to(root)
@@ -89,6 +121,8 @@ def finish_workspace(workspace: Path, trace_dir: Path) -> None:
     manifest["integrity"] = {"valid": not invalid and manifest_valid,
                              "changed_chunk_ids": invalid, "manifest_valid": manifest_valid}
     atomic_json(trace_dir / "native-workspace.json", manifest)
+    if manifest.get("format_version") == 2:
+        return  # Never chmod or otherwise modify original source files.
     # Windows cannot remove read-only files during TemporaryDirectory cleanup.
     for source in manifest["sources"]:
         path = root / source["file"]

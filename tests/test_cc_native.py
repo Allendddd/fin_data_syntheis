@@ -417,9 +417,9 @@ def test_native_rejects_changed_corpus_and_unbound_final(tmp_path):
 
 
 @pytest.mark.parametrize("field", ["tools", "allowed_tools"])
-def test_native_configuration_rejects_mcp(field):
-    with pytest.raises(ValueError, match="built-in"):
-        ClaudeCodeSettings(mode="native", **{field: ("mcp__finance__search_corpus",)})
+def test_native_configuration_accepts_explicit_mcp_tools(field):
+    configured = ClaudeCodeSettings(mode="native", **{field: ("mcp__custom__search",)})
+    assert getattr(configured, field) == ("mcp__custom__search",)
 
 
 def test_native_export_rejects_even_unused_mcp_definitions(tmp_path):

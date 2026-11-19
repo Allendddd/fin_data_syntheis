@@ -46,10 +46,11 @@ def export_queries(
                     raise ValueError("validated long-horizon task lacks a query, task ID, or entity ID")
                 split = split_for_task(task_id, float(config["training"]["split_validation_fraction"]))
                 bucket = entity_bucket(entity_id, int(config["dag"]["entity_buckets"]))
-                snapshot = layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
-                if not snapshot.is_file():
+                snapshot = None if config.get("harness", {}).get("retrieval") else layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
+                if snapshot is not None and not snapshot.is_file():
                     raise RuntimeError(f"query snapshot index is missing: {snapshot}")
-                snapshots.add(snapshot)
+                if snapshot is not None:
+                    snapshots.add(snapshot)
                 line_index = counts[split]
                 streams[split].write(json.dumps({"query": query}, ensure_ascii=False, separators=(",", ":")) + "\n")
                 hidden.write(json.dumps({
@@ -57,7 +58,7 @@ def export_queries(
                     "split": split,
                     "line_index": line_index,
                     "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
-                    "snapshot_index": snapshot.relative_to(layout.root).as_posix(),
+                    "snapshot_index": snapshot.relative_to(layout.root).as_posix() if snapshot is not None else None,
                     "task": task,
                 }, ensure_ascii=False, separators=(",", ":")) + "\n")
                 counts[split] += 1
@@ -76,7 +77,8 @@ def export_queries(
         "source_run_fingerprint": plan["run_fingerprint"],
         "cutoff": config["run"]["cutoff"],
         "available_at_field": config["input"]["available_at_field"],
-        "toolset_fingerprint": load_tool_registry(config.get("harness", {}).get("tool_registry")).fingerprint,
+        "toolset_fingerprint": None if config.get("harness", {}).get("retrieval") else load_tool_registry(config.get("harness", {}).get("tool_registry")).fingerprint,
+        "audit_contract_version": 2 if config.get("harness", {}).get("retrieval") else 1,
         "counts": counts,
         "hidden_verifier": "hidden-verifier.jsonl",
         "model_visible_fields": ["query"],

@@ -22,19 +22,22 @@ from mint_synth.core.provenance import sha256_file
 class HarnessCase:
     query_id: str
     query: str
-    snapshot_path: Path
+    snapshot_path: Path | None
     cutoff: str
     entity_id: str
     dated_only: bool
     task: Mapping[str, Any] = field(repr=False)
     toolset_fingerprint: str | None = None
     available_at_field: str = "published_at"
+    retrieval: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    archive_path: Path | None = field(default=None, repr=False)
 
 
 def case_from_task(
-    task: Mapping[str, Any], snapshot_path: str | Path, *, cutoff: str,
+    task: Mapping[str, Any], snapshot_path: str | Path | None, *, cutoff: str,
     available_at_field: str = "published_at", query_id: str | None = None,
     query: str | None = None, toolset_fingerprint: str | None = None,
+    retrieval: Mapping[str, Any] | None = None, archive_path: Path | None = None,
 ) -> HarnessCase:
     """Check a hidden task before exposing its query to a rollout."""
     evidence = task.get("evidence") or []
@@ -75,14 +78,15 @@ def case_from_task(
     case_id = str(query_id or task.get("task_id") or "")
     if not case_id:
         raise ValueError("task has no query ID")
-    path = Path(snapshot_path).resolve()
-    if not path.is_file():
+    path = Path(snapshot_path).resolve() if snapshot_path is not None else None
+    if not retrieval and (path is None or not path.is_file()):
         raise ValueError(f"snapshot index is missing: {path}")
     return HarnessCase(
         query_id=case_id, query=text,
         snapshot_path=path, cutoff=cutoff, entity_id=entity_id,
         dated_only=dated_only, task=task, toolset_fingerprint=toolset_fingerprint,
         available_at_field=available_at_field,
+        retrieval=dict(retrieval or {}), archive_path=archive_path,
     )
 
 
@@ -102,7 +106,8 @@ class HarnessSession:
         if max_tool_calls is not None and max_tool_calls < 1:
             raise ValueError("tool call limit must be positive")
         self.case = case
-        self.registry = (registry or default_tool_registry()).copy()
+        from mint_synth.harness.registry import load_tool_registry
+        self.registry = (registry or load_tool_registry(retrieval=case.retrieval)).copy()
         if case.toolset_fingerprint and self.registry.fingerprint != case.toolset_fingerprint and not allow_toolset_override:
             raise ValueError("session toolset differs from the query export")
         self.allow_toolset_override = allow_toolset_override
@@ -139,10 +144,13 @@ class HarnessSession:
 
     def reset(self) -> dict[str, Any]:
         self.close()
-        self.tools = SnapshotTools(
-            self.case.snapshot_path, self.case.cutoff,
-            entity_id=self.case.entity_id, dated_only=self.case.dated_only,
-        )
+        if self.case.retrieval:
+            from mint_synth.harness.resources import ResourceTools
+            self.tools = ResourceTools(self.case.retrieval, self.case.cutoff, entity_id=self.case.entity_id,
+                                       dated_only=self.case.dated_only, archive=self.case.archive_path)
+        else:
+            self.tools = SnapshotTools(self.case.snapshot_path, self.case.cutoff,
+                                       entity_id=self.case.entity_id, dated_only=self.case.dated_only)
         self._grade_cache = None
         self._derivation_text = ""
         self._trace = []
@@ -174,7 +182,7 @@ class HarnessSession:
 
     @property
     def system_prompt(self) -> str:
-        return harness_system(self.case.cutoff, self.registry.names)
+        return harness_system(self.case.cutoff, self.registry.names, mode=self.case.retrieval.get("mode"))
 
     @property
     def trace(self) -> list[dict[str, Any]]:
@@ -334,12 +342,19 @@ class HarnessSession:
             if row is None or value.get("source_id") != row[0] or value.get("available_at") != row[1]:
                 raise ValueError("source chunk is absent from the permitted snapshot")
             excerpt = value.get("excerpt", "")
-            observed_text = observation.get("text")
+            from mint_synth.harness.resources import source_observations
+            observed_text = next((item["text"] for item in source_observations(dict(observation))
+                                  if item["chunk_id"] == chunk_id), None)
             if (not isinstance(observed_text, str) or not observed_text
                     or observed_text not in row[2] or not isinstance(excerpt, str)
                     or excerpt not in observed_text):
                 raise ValueError("evidence excerpt is not in its source chunk")
-            value["artifact_ref"] = f"snapshot:{chunk_id}"
+            if self.case.retrieval:
+                source = self.tools.sources[chunk_id]
+                value["artifact_ref"] = "sha256:" + source["sha256"]
+                value["locator"] = source["locator"]
+            else:
+                value["artifact_ref"] = f"snapshot:{chunk_id}"
         elif kind == "calculation":
             if not isinstance(value.get("value"), str):
                 raise ValueError("calculation record needs a value")
@@ -350,16 +365,26 @@ class HarnessSession:
             raise ValueError("evidence record exceeds context limit")
         return value
 
+    def _environment_hash(self) -> str:
+        if self.case.retrieval:
+            if self.tools is not None:
+                return self.tools.fingerprint
+            from .resources import resource_fingerprint
+            return resource_fingerprint(self.case.retrieval)
+        return sha256_file(self.case.snapshot_path)
+
     def checkpoint(self) -> dict[str, Any]:
         """Return a model-visible pre-action state for critical-turn resampling."""
         if self._done or self.tools is None:
             raise RuntimeError("only an active episode can be checkpointed")
         if self._snapshot_hash is None:
-            self._snapshot_hash = sha256_file(self.case.snapshot_path)
+            self._snapshot_hash = self._environment_hash()
         return {
             "version": 1, "query_id": self.case.query_id, "query": self.case.query,
             "query_sha256": hashlib.sha256(self.case.query.encode("utf-8")).hexdigest(),
             "snapshot_sha256": self._snapshot_hash,
+            "retrieval_mode": self.case.retrieval.get("mode", "legacy_snapshot"),
+            "environment_fingerprint": self._snapshot_hash,
             "toolset_fingerprint": self.registry.fingerprint,
             "cutoff": self.case.cutoff,
             "limits": {"max_steps": self.max_steps, "max_tool_calls": self.max_tool_calls,
@@ -376,7 +401,7 @@ class HarnessSession:
             raise ValueError("checkpoint query differs")
         if checkpoint.get("query") != self.case.query:
             raise ValueError("checkpoint query text differs")
-        self._snapshot_hash = sha256_file(self.case.snapshot_path)
+        self._snapshot_hash = self._environment_hash()
         if checkpoint.get("snapshot_sha256") != self._snapshot_hash:
             raise ValueError("checkpoint snapshot differs")
         if checkpoint.get("toolset_fingerprint") != self.registry.fingerprint or checkpoint.get("cutoff") != self.case.cutoff:
@@ -388,6 +413,9 @@ class HarnessSession:
         if not isinstance(history, list) or len(history) >= self.max_steps:
             raise ValueError("checkpoint history is invalid")
         self.reset()
+        if self.case.retrieval:
+            self.tools.replay_history = [entry for entry in history if self.registry.validate(
+                str(entry.get("action", {}).get("tool", "")), entry.get("action", {}).get("arguments", {})) is None]
         for previous in history:
             if not isinstance(previous, Mapping) or not isinstance(previous.get("action"), Mapping):
                 raise ValueError("checkpoint action is invalid")
@@ -424,6 +452,9 @@ class HarnessSession:
             solution_reviewer=self.solution_reviewer, sample_key=self.sample_key,
         )
         try:
+            if self.case.retrieval:
+                branch.tools.replay_history = [entry for entry in self._trace[:step - 1] if self.registry.validate(
+                    str(entry["action"].get("tool", "")), entry["action"].get("arguments", {})) is None]
             for previous in self._trace[:step - 1]:
                 result = branch.step(previous["action"])
                 if result["done"] or result["observation"] != previous["observation"]:
@@ -450,7 +481,8 @@ class HarnessSession:
                 continue
             chunk_id = str(record["chunk_id"])
             observed = self._trace[int(record["step"]) - 1]["observation"]
-            text = observed.get("text") if isinstance(observed, Mapping) else None
+            from mint_synth.harness.resources import source_observations
+            text = next((item["text"] for item in source_observations(observed) if item["chunk_id"] == chunk_id), None)
             row = self.tools.db.execute(
                 "SELECT source_id,available_at,text FROM chunks WHERE chunk_id=?", (chunk_id,),
             ).fetchone()
@@ -482,7 +514,8 @@ class HarnessSession:
                     for action in actions], self._final])
             verdict = assess_solution(self.case.task, material, self.solution_reviewer,
                                       acquired=acquired, actions=actions, tolerance=self.answer_tolerance,
-                                      sample_key=self.sample_key, final_response=self._final)
+                                      sample_key=self.sample_key, final_response=self._final,
+                                      source_records=getattr(self.tools, "sources", None))
         evidence_valid = not missing and not mismatched
         accepted = bool(self._final) and evidence_valid and verdict["accepted"] and cutoff_valid
         if not evidence_valid:
@@ -542,12 +575,14 @@ class HarnessSession:
         """Return a trainer-side replay record after terminal grading."""
         verdict = self.grade()
         if self._snapshot_hash is None:
-            self._snapshot_hash = sha256_file(self.case.snapshot_path)
+            self._snapshot_hash = self._environment_hash()
         return {
             "query_id": self.case.query_id,
             "query": self.case.query,
             "cutoff": self.case.cutoff,
             "snapshot_sha256": self._snapshot_hash,
+            "environment_fingerprint": self._snapshot_hash,
+            "retrieval_mode": self.case.retrieval.get("mode", "legacy_snapshot"),
             "toolset_fingerprint": self.registry.fingerprint,
             "trace": self.trace,
             "evidence_ledger": self.evidence_ledger,

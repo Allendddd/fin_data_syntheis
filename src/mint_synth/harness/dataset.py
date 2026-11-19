@@ -37,13 +37,18 @@ def _next_object(stream: Any, name: str) -> dict[str, Any]:
     return value
 
 
-def iter_cases(run_dir: str | Path, *, split: str | None = None) -> Iterator[HarnessCase]:
+def iter_cases(run_dir: str | Path, *, split: str | None = None, retrieval: Mapping[str, Any] | None = None,
+               archive_root: str | Path | None = None) -> Iterator[HarnessCase]:
     """Yield evaluator-side cases; never pass their ``task`` to the model."""
     if split not in (None, "train", "val"):
         raise ValueError("split must be train, val or None")
     run_root = Path(run_dir).resolve()
     query_root = _query_root(run_root)
     manifest = _read_json(query_root / "manifest.json")
+    if retrieval is None:
+        import yaml
+        config = yaml.safe_load((run_root / "resolved_config.yaml").read_text(encoding="utf-8"))
+        retrieval = config.get("harness", {}).get("retrieval")
     if manifest.get("model_visible_fields") != ["query"]:
         raise ValueError("query manifest does not declare a query-only model view")
     for name in ("train.jsonl", "val.jsonl", "hidden-verifier.jsonl"):
@@ -89,7 +94,7 @@ def iter_cases(run_dir: str | Path, *, split: str | None = None) -> Iterator[Har
             if relative.is_absolute() or not snapshot.is_relative_to(run_root):
                 raise ValueError("snapshot path escapes the run directory")
             reference = relative.as_posix()
-            if reference not in verified_snapshots:
+            if not retrieval and reference not in verified_snapshots:
                 if not snapshot.is_file():
                     raise ValueError(f"query snapshot is missing: {reference}")
                 if snapshot_artifacts:
@@ -101,9 +106,10 @@ def iter_cases(run_dir: str | Path, *, split: str | None = None) -> Iterator[Har
             if not isinstance(task, Mapping):
                 raise ValueError("hidden verifier task is missing")
             case = case_from_task(
-                task, snapshot, cutoff=str(cutoff), available_at_field=str(available_field),
+                task, None if retrieval else snapshot, cutoff=str(cutoff), available_at_field=str(available_field), retrieval=retrieval,
+                archive_path=(Path(archive_root) / hashlib.sha256(str(row.get("query_id", "")).encode()).hexdigest()) if archive_root else None,
                 query_id=str(row.get("query_id") or ""), query=query,
-                toolset_fingerprint=manifest.get("toolset_fingerprint"),
+                toolset_fingerprint=None if retrieval else manifest.get("toolset_fingerprint"),
             )
             if split is None or split == row_split:
                 yield case

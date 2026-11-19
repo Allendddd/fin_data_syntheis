@@ -23,7 +23,7 @@ from typing import Any
 
 from mint_synth.core.run_state import atomic_json
 
-from .base import ClaudeCodeSettings, CodexSettings, ModelSettings, RuntimeResult, RuntimeSettings
+from .base import ClaudeCodeSettings, CodexSettings, ModelSettings, RuntimeResult, RuntimeSettings, runtime_for_retrieval
 from .mcp_server import FinanceMCPServer
 from .cc_workspace import finish_workspace, native_final_reply, prepare_workspace
 from .codex_events import native_final_reply as codex_final_reply
@@ -44,7 +44,7 @@ def _private_file(path: Path, content: str) -> None:
         stream.write(content)
 
 
-def _environment(home: Path, model: ModelSettings, token: str | None = None) -> dict[str, str]:
+def _environment(home: Path, model: ModelSettings, token: str | None = None, *, inherit_tools: bool = False) -> dict[str, str]:
     # Avoid inheriting a developer's cloud credentials or another agent's login,
     # model endpoint, config directory, proxy, or runtime options.
     environment = {
@@ -53,6 +53,9 @@ def _environment(home: Path, model: ModelSettings, token: str | None = None) -> 
         and not key.upper().startswith(("ANTHROPIC_", "CLAUDE_", "CODEX_", "OPENAI_"))
         and key.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}
     }
+    if inherit_tools:
+        # Native web tools may use their own credentials, proxies and settings.
+        environment = dict(os.environ)
     environment.update({
         "HOME": str(home),
         "USERPROFILE": str(home),
@@ -69,12 +72,18 @@ def _environment(home: Path, model: ModelSettings, token: str | None = None) -> 
     return environment
 
 
+def _web_mode(bridge: Any) -> bool:
+    return getattr(getattr(bridge, "case", bridge), "retrieval", {}).get("mode") == "web"
+
+
 def _codex_command(
     prefix: tuple[str, ...], home: Path, workdir: Path, model: ModelSettings,
     bridge: Any, url: str | None, options: CodexSettings | None = None,
 ) -> list[str]:
     options = options or CodexSettings()
-    native = options.mode == "native"
+    web = _web_mode(bridge)
+    backend = web and bool(getattr(getattr(bridge, "case", bridge), "retrieval", {}).get("web", {}).get("search_endpoint"))
+    native = options.mode == "native" or web
     sandbox = options.sandbox if native else "read-only"
     codex_home = home / ".codex"
     codex_home.mkdir(mode=0o700)
@@ -91,25 +100,19 @@ def _codex_command(
         *instructions_config,
         'approval_policy = "never"',
         f"sandbox_mode = {quote(sandbox)}",
-        'web_search = "disabled"',
-        "project_doc_max_bytes = 0",
+        f"web_search = {quote('live' if web else 'disabled')}",
+        *([] if web else ["project_doc_max_bytes = 0"]),
         "[history]",
         'persistence = "none"',
         "[analytics]",
         "enabled = false",
         "[features]",
-        f"shell_tool = {'true' if native else 'false'}",
-        "shell_snapshot = false",
-        f"view_image = {'true' if native else 'false'}",
-        "apps = false",
-        "multi_agent = false",
-        "memories = false",
-        "goals = false",
-        "hooks = false",
-        "remote_plugin = false",
+        *(["standalone_web_search = true"] if backend else []),
+        *([] if web else [f"shell_tool = {'true' if native else 'false'}", "shell_snapshot = false",
+            f"view_image = {'true' if native else 'false'}", "apps = false", "multi_agent = false", "memories = false",
+            "goals = false", "hooks = false", "remote_plugin = false"]),
         "enable_request_compression = false",
-        "[skills.bundled]",
-        "enabled = false",
+        *([] if web else ["[skills.bundled]", "enabled = false"]),
         "[model_providers.mint_finance]",
         'name = "Mint finance synthesis"',
         f"base_url = {quote(base_url)}",
@@ -117,25 +120,27 @@ def _codex_command(
         'wire_api = "responses"',
         "requires_openai_auth = false",
         "supports_websockets = false",
+        *(["supports_standalone_web_search = true"] if backend else []),
         f"stream_idle_timeout_ms = {max(1000, int(model.timeout_seconds * 1000))}",
     ]
+    if backend:
+        configuration_lines.extend(["[tools]", 'client_search_provider = "standalone"'])
     if native:
         configuration_lines.extend([
-            "[sandbox_workspace_write]", "network_access = false",
+            "[sandbox_workspace_write]", f"network_access = {'true' if web else 'false'}",
             "[shell_environment_policy]", "ignore_default_excludes = false",
-            "[mcp_servers]",
         ])
-    else:
+    if url is not None:
         tool_names = [item["function"]["name"] for item in bridge.tool_definitions]
         configuration_lines.extend([
             "[mcp_servers.finance]", f"url = {quote(url)}",
             'bearer_token_env_var = "MINT_MCP_TOKEN"', "required = true",
-            f"enabled_tools = {quote(tool_names)}", 'default_tools_approval_mode = "auto"',
-            "supports_parallel_tool_calls = false", "startup_timeout_sec = 30",
+            *([] if web else [f"enabled_tools = {quote(tool_names)}", "supports_parallel_tool_calls = false"]),
+            'default_tools_approval_mode = "auto"', "startup_timeout_sec = 30",
             f"tool_timeout_sec = {max(1, int(model.timeout_seconds))}",
         ])
     _private_file(codex_home / "config.toml", "\n".join([*configuration_lines, ""]))
-    return [*prefix, "exec", "--json", "--ephemeral", "--strict-config", "--ignore-rules",
+    return [*prefix, "exec", "--json", "--ephemeral", "--strict-config", *([] if web else ["--ignore-rules"]),
             "--skip-git-repo-check", "--sandbox", sandbox, "--cd", str(workdir), "-"]
 
 
@@ -146,10 +151,11 @@ def _claude_command(
 ) -> list[str]:
     options = options or ClaudeCodeSettings()
     (home / ".claude").mkdir(mode=0o700)
-    native = options.mode == "native"
+    web = _web_mode(bridge)
+    native = options.mode == "native" or web
     configuration = home / "mcp.json"
     _private_file(configuration, json.dumps({
-        "mcpServers": {} if native else {"finance": {"type": "http", "url": url,
+        "mcpServers": {} if url is None else {"finance": {"type": "http", "url": url,
                                                         "headers": {"Authorization": f"Bearer {token}"}}},
     }, ensure_ascii=False))
     tool_names = [] if native else ["mcp__finance__" + item["function"]["name"] for item in bridge.tool_definitions]
@@ -163,18 +169,21 @@ def _claude_command(
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": model.model,
         "API_TIMEOUT_MS": str(max(1000, int(model.timeout_seconds * 1000))),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     })
-    permissions = (["--allowedTools", *options.allowed_tools] if options.allowed_tools else []) if native else [
+    if not web:
+        environment["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1"
+    permissions = (["--allowedTools", *options.allowed_tools, *(["mcp__finance__*"] if url else [])] if options.allowed_tools or url else []) if native else [
         "--allowedTools", ",".join(tool_names)]
+    if web:
+        permissions = ["--allowedTools", *options.allowed_tools] if options.allowed_tools else []
     return [
         *prefix, "--print", *([] if native else ["--bare"]),
-        "--tools", ",".join(options.tools) if native else "",
-        "--strict-mcp-config", "--mcp-config", str(configuration),
-        *(["--disallowedTools", "mcp__*"] if native else []),
+        *([] if web and options.tools == ("default",) else ["--tools", ",".join(options.tools) if native else ""]),
+        *(["--mcp-config", str(configuration)] if web and url else [] if web else ["--strict-mcp-config", "--mcp-config", str(configuration)]),
+        *([] if web else ["--disallowedTools", "mcp__*"] if native and not url else ["--disallowedTools", "WebSearch", "WebFetch"] if native else []),
         *permissions,
-        "--permission-mode", "dontAsk",
+        *([] if web else ["--permission-mode", "dontAsk"]),
         *([] if native else ["--disable-slash-commands"]),
         "--no-session-persistence", "--output-format", "stream-json",
         "--verbose", "--include-partial-messages",
@@ -211,7 +220,7 @@ def _terminate_tree(process: subprocess.Popen) -> None:
 
 
 def _audit_events(path: Path, runtime: str, tool_names: set[str], *, claude_native: bool = False,
-                  codex_native: bool = False) -> tuple[int, str | None]:
+                  codex_native: bool = False, resource_tools: bool = False, unrestricted_web: bool = False) -> tuple[int, str | None]:
     count = 0
     failure = None
     with path.open("rb") as stream:
@@ -230,12 +239,14 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str], *, claude_nati
             if runtime == "codex":
                 if event_type in {"error", "turn.failed"}:
                     failure = failure or "Codex reported a failed turn"
+                if unrestricted_web:
+                    continue
                 item = event.get("item")
                 if event_type.startswith("item.") and isinstance(item, dict):
                     kind = item.get("type")
-                    if codex_native and kind == "mcp_tool_call":
+                    if codex_native and kind == "mcp_tool_call" and not resource_tools:
                         failure = failure or "Codex native mode emitted an MCP tool call"
-                    elif codex_native and kind not in _CODEX_NATIVE_ITEMS:
+                    elif codex_native and kind not in _CODEX_NATIVE_ITEMS and not (resource_tools and kind == "mcp_tool_call"):
                         failure = failure or "Codex native mode emitted an unsupported tool event"
                     elif not codex_native and kind not in _CODEX_ITEMS:
                         failure = failure or "Codex emitted a non-finance or unsupported tool event"
@@ -251,10 +262,13 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str], *, claude_nati
                     if not isinstance(block, dict) or block.get("type") != "tool_use":
                         continue
                     name = block.get("name")
+                    if unrestricted_web:
+                        continue
                     allowed = {"mcp__finance__" + name for name in tool_names} | {"EndConversation"}
                     if claude_native:
                         if not isinstance(name, str) or name.startswith("mcp__"):
-                            failure = failure or "Claude Code native mode emitted an MCP or invalid tool call"
+                            if not resource_tools or not str(block.get("name", "")).startswith("mcp__finance__"):
+                                failure = failure or "Claude Code native mode emitted an MCP or invalid tool call"
                         continue
                     if name not in allowed:
                         failure = failure or "Claude Code emitted a non-finance tool call"
@@ -264,8 +278,10 @@ def _audit_events(path: Path, runtime: str, tool_names: set[str], *, claude_nati
 
 
 def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_dir: Path) -> RuntimeResult:
-    # In CLI native mode the first argument is a data-only HarnessCase, not a
-    # FinanceToolBridge. No session or custom tool server is constructed.
+    # Native mode owns the agent loop. Legacy calls receive a HarnessCase;
+    # configured resources use a public ResearchBridge without finance grading
+    # or a custom final-submission action in the model-facing tool server.
+    settings = runtime_for_retrieval(settings, getattr(getattr(bridge, "case", bridge), "retrieval", None))
     if settings.name not in {"codex", "claude_code"}:
         raise ValueError("CLI runtime must be codex or claude_code")
     if settings.extra_args:
@@ -299,6 +315,8 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
     claude_native = settings.name == "claude_code" and settings.claude_code.mode == "native"
     codex_native = settings.name == "codex" and settings.codex.mode == "native"
     native = claude_native or codex_native
+    resource_native = native and hasattr(bridge, "case") and bool(bridge.case.retrieval)
+    source_server = resource_native and bool(bridge.tool_definitions)
     if settings.name == "claude_code":
         metadata["claude_code_mode"] = settings.claude_code.mode
     elif settings.name == "codex":
@@ -313,14 +331,14 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
             home = Path(temporary)
             workdir = home / "workspace"
             workdir.mkdir(mode=0o700)
-            with (nullcontext() if native else FinanceMCPServer(bridge)) as mcp:
-                environment = _environment(home, model, None if native else mcp.token)
+            with (nullcontext() if native and not source_server else FinanceMCPServer(bridge)) as mcp:
+                environment = _environment(home, model, mcp.token if mcp is not None else None, inherit_tools=_web_mode(bridge))
                 if settings.name == "codex":
-                    command = _codex_command(prefix, home, workdir, model, bridge, None if native else mcp.url,
+                    command = _codex_command(prefix, home, workdir, model, bridge, mcp.url if mcp is not None else None,
                                              settings.codex)
                 else:
-                    command = _claude_command(prefix, home, model, bridge, None if claude_native else mcp.url,
-                                              None if claude_native else mcp.token, environment, settings.claude_code)
+                    command = _claude_command(prefix, home, model, bridge, mcp.url if mcp is not None else None,
+                                              mcp.token if mcp is not None else None, environment, settings.claude_code)
                 prompt = (prepare_workspace(bridge, workdir, trace_dir, runtime="codex") if codex_native else
                           prepare_workspace(bridge, workdir, trace_dir)) if native else (
                     "Complete the financial query in this public state. Use only the finance MCP tools, "
@@ -346,9 +364,9 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
                         finally:
                             if native:
                                 finish_workspace(workdir, trace_dir)
-                count, audit_error = _audit_events(stdout_path, settings.name, set() if native else {
+                count, audit_error = _audit_events(stdout_path, settings.name, set() if native and not resource_native else {
                     item["function"]["name"] for item in bridge.tool_definitions
-                }, claude_native=claude_native, codex_native=codex_native)
+                }, claude_native=claude_native, codex_native=codex_native, resource_tools=resource_native, unrestricted_web=_web_mode(bridge))
                 metadata["event_count"] = count
                 if status != "timeout":
                     if exit_code != 0:
@@ -359,7 +377,7 @@ def run_cli(bridge: Any, model: ModelSettings, settings: RuntimeSettings, trace_
                         native_final_reply(stdout_path)
                         status = "completed"
                     elif codex_native:
-                        final_text, final_id = codex_final_reply(stdout_path)
+                        final_text, final_id = codex_final_reply(stdout_path, allow_mcp=resource_native)
                         metadata["final_text_sha256"] = hashlib.sha256(final_text.encode()).hexdigest()
                         if final_id is not None:
                             metadata["final_message_id"] = final_id

@@ -8,7 +8,7 @@ from pathlib import Path
 from .trajectory import TrajectoryError
 
 
-def native_final_reply(events_path: Path) -> tuple[str, str | None]:
+def native_final_reply(events_path: Path, *, allow_mcp: bool = False) -> tuple[str, str | None]:
     """Use the last completed root turn; never choose a correct earlier draft.
 
     Codex's ``item.id`` belongs to its CLI event stream and is not a model
@@ -38,12 +38,14 @@ def native_final_reply(events_path: Path) -> tuple[str, str | None]:
                 final, active = candidate, False
             elif isinstance(kind, str) and kind.startswith("item."):
                 item = event.get("item")
+                if isinstance(item, dict) and item.get("type") == "error" and not active:
+                    continue  # CLI startup diagnostics precede the first root turn.
                 if not isinstance(item, dict) or not active:
                     raise TrajectoryError("Codex native item is not bound to an active root turn")
                 item_kind = item.get("type")
-                if item_kind == "mcp_tool_call":
+                if item_kind == "mcp_tool_call" and not allow_mcp:
                     raise TrajectoryError("Codex native emitted an MCP tool call")
-                if item_kind in {"command_execution", "file_change", "web_search"}:
+                if item_kind in {"command_execution", "file_change", "web_search", "mcp_tool_call"}:
                     candidate = None
                 elif kind == "item.completed" and item_kind == "agent_message":
                     text = item.get("text")

@@ -89,6 +89,7 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
     sample_file = trace_dir / "cc-native.jsonl"
     descriptor = os.open(sample_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     final_seen = False
+    web = bool(snapshot.get("unrestricted_web"))
     with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
         for call in iter_captured_calls(trace_dir):
             if call["protocol"] != "anthropic":
@@ -99,15 +100,22 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
             if not isinstance(context, list) or not context or not isinstance(tools, list):
                 raise TrajectoryError("CC native request has invalid messages or tools")
             names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
-            if len(names) != len(tools) or any(not isinstance(name, str) for name in names) or len(set(names)) != len(names):
+            if web:
+                if any(not isinstance(tool, dict) or not isinstance(tool.get("name", tool.get("type")), str) for tool in tools):
+                    raise TrajectoryError("CC native request has invalid tool definitions")
+                # Provider-managed MCP toolsets identify the server rather than
+                # enumerate every tool name in the client request.
+                names = [tool["name"] for tool in tools if "name" in tool]
+            if (not web and len(names) != len(tools)) or any(not isinstance(name, str) for name in names) or len(set(names)) != len(names):
                 raise TrajectoryError("CC native request has invalid or duplicate tool definitions")
-            if any(name.startswith("mcp__") for name in names):
+            from .native_capture import resource_mcp
+            if any(name.startswith("mcp__") and not (web or snapshot.get("resource_mode") and resource_mcp(name)) for name in names):
                 raise TrajectoryError("CC native request contains MCP tool definitions")
             response = anthropic_response(call["response_text"], streaming=call["streaming"])
             content = response["content"]
             block_loss = []
             flags = snapshot.get("action_relevance", {})
-            uses = [block for block in content if block.get("type") == "tool_use"]
+            uses = [block for block in content if block.get("type") in ({"tool_use", "server_tool_use", "mcp_tool_use"} if web else {"tool_use"})]
             if any(block.get("id") not in flags for block in uses):
                 raise TrajectoryError("CC native export has no action relevance decision")
             text_loss = all(flags.get(block.get("id"), {}).get("relevant", True) for block in uses)
@@ -116,12 +124,12 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
                     raise TrajectoryError("CC native response contains an invalid block")
                 loss = block["type"] not in {"redacted_thinking", "tool_result"} and not block["type"].endswith("_tool_result")
                 loss = loss and text_loss
-                if block["type"] == "tool_use":
+                if block["type"] in {"tool_use", "server_tool_use", "mcp_tool_use"}:
                     name, arguments = block.get("name"), block.get("input")
-                    if ((name not in names and block.get("id") not in snapshot.get("failed_tool_ids", []))
+                    if ((name not in names and block.get("id") not in snapshot.get("failed_tool_ids", []) and not web)
                             or not isinstance(arguments, dict) or not isinstance(block.get("id"), str)):
                         raise TrajectoryError("CC native tool call is absent from its request tools or has invalid input/ID")
-                    if name.startswith("mcp__"):
+                    if name.startswith("mcp__") and not (web or snapshot.get("resource_mode") and resource_mcp(name)):
                         raise TrajectoryError("CC native capture contains an MCP tool call")
                     loss = flags.get(block["id"], {}).get("relevant", True)
                 block_loss.append(loss)
@@ -135,6 +143,10 @@ def export_cc_native(snapshot: Mapping[str, Any], trace_dir: Path) -> dict[str, 
                           target_message_index=len(context), loss_mask=[False] * len(context) + [any(block_loss)],
                           target_block_loss_mask=block_loss,
                           response_metadata={key: value for key, value in response.items() if key not in {"content", "role"}})
+            if web:
+                sample["target_block_field_loss_mask"] = {
+                    str(index): {key: key in {"text", "thinking", "name", "input"} for key in block}
+                    for index, block in enumerate(content)}
             stream.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
             source_map.append({"sample_index": len(source_map), "call_id": call["call_id"],
                                "source": call["source"], "response_file": call["response_file"],

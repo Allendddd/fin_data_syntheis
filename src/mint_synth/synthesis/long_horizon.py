@@ -90,12 +90,12 @@ def load_seed_bank(path: str | None) -> list[dict[str, Any]]:
         return [dict(seed) for seed in DEFAULT_SEEDS]
     seeds: list[dict[str, Any]] = []
     for index, row in enumerate(read_jsonl(path), 1):
-        query = row.get("seed_query", row.get("text", row.get("question")))
+        query = row.get("query", row.get("seed_query", row.get("text", row.get("question"))))
         if not isinstance(query, str) or not query.strip():
-            raise ValueError(f"{path}:{index}: seed requires seed_query, text, or question")
+            raise ValueError(f"{path}:{index}: seed requires query, seed_query, text, or question")
         seeds.append(
             {
-                "seed_id": str(row.get("seed_id") or stable_id("seed", index, query)),
+                "seed_id": str(row.get("seed_id") or stable_id("seed", query.strip())),
                 "seed_query": query.strip(),
                 "task_spec_template": row.get("task_spec_template"),
                 "origin": row.get("origin", "user_seed_bank"),

@@ -44,7 +44,11 @@ def stage_sft_prepare(
                   *(role for role in long_roles if agent_settings[role][1].name == "native")]
     clients = {role: _role_client(layout, config, "sft_prepare", shard_id, role) for role in dict.fromkeys(json_roles)}
     needs_finance = any(not settings.native_tools for _model, settings in agent_settings.values())
-    registry = load_tool_registry(config.get("harness", {}).get("tool_registry")) if needs_finance else None
+    retrieval = config.get("harness", {}).get("retrieval")
+    if long_roles and retrieval:
+        from mint_synth.harness.resources import validate_retrieval
+        validate_retrieval(retrieval)
+    registry = load_tool_registry(config.get("harness", {}).get("tool_registry"), retrieval=retrieval) if needs_finance else None
     if long_roles:
         traces = output / "traces"
         traces.mkdir(mode=0o700, exist_ok=True)
@@ -99,7 +103,7 @@ def stage_sft_prepare(
                 sample = None
                 reason = "no rollout accepted"
                 bucket = entity_bucket(str(task.get("canonical_entity_id") or ""), int(config["dag"]["entity_buckets"]))
-                index_path = layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
+                index_path = None if retrieval else layout.shard("retrieval_index", bucket) / "snapshot.sqlite3"
                 for attempt in range(int(training["rollouts_per_task"])):
                     role = long_roles[attempt % len(long_roles)]
                     model, runtime = agent_settings[role]
@@ -216,4 +220,5 @@ def stage_sft_prepare(
     finally:
         for stream in streams.values():
             stream.close()
-    return {**counts, "llm": {role: _client_stats(client) for role, client in clients.items()}}
+    return {**counts, "retrieval_mode": retrieval.get("mode") if retrieval else "legacy_snapshot",
+            "llm": {role: _client_stats(client) for role, client in clients.items()}}

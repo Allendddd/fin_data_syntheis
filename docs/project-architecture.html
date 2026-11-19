@@ -110,7 +110,7 @@ code,pre{font-family:"Cascadia Code",Consolas,monospace}code{color:#bce7ff;overf
 <span class="arrow" aria-hidden="true">→</span>
 <div class="node output"><h4>最终提交与私有校验</h4><p>金融模式的 submit_final(answer) 转为 final 动作；检查引用、计算与答案，合格后输出统一金融 SFT。</p></div>
 </div></div>
-<div class="callout"><strong>原生工具模式：普通语料文件 → 框架工具执行 → 正常最终答复 → 离线审核。</strong><p>Strands、Codex、CC 的 native 模式不创建金融 bridge / session / MCP，不注册 submit_final；保留各自原生工具和默认 system。采集器给出问题、冻结语料目录与自然语言解答要求，随后核对实际读取、文件完整性和最终证明。项目的 <code>default: native</code> JSON runtime 与这三个框架的 <code>mode: native</code> 含义不同。</p></div>
+<div class="callout"><strong>原生工具模式：原始文件或联网研究 → 正常最终答复 → 离线审核。</strong><p>Strands、Codex、CC 保留原生工具和默认 system，不注册 submit_final。static 提供原文件库；web 不挂载静态库，search_endpoint 设置后绑定标准搜索工具的执行后端，其他工具继续可用。搜索服务 RPC 留作观察，不作为教师模型预测样本。采集器核对真实返回、来源、时间和解答。项目的 <code>default: native</code> JSON runtime 与三个框架的 <code>mode: native</code> 含义不同。</p></div>
 <div class="table-wrap"><table><thead><tr><th>Runtime</th><th>模型协议</th><th>接入实现</th><th>上下文与采样</th></tr></thead><tbody>
 <tr><td>native</td><td>OpenAI Chat Completions，JSON 动作</td><td><a href="../src/mint_synth/sft/rollout.py">sft/rollout.py</a></td><td>项目可见状态打包；角色 temperature/max_tokens；角色缓存按配置生效。</td></tr>
 <tr><td>strands</td><td>OpenAI Chat Completions，工具调用</td><td><a href="../src/mint_synth/agents/strands_runtime.py">agents/strands_runtime.py</a></td><td>裸 SDK Agent 与自身消息历史；角色 temperature/max_tokens；不复用 native JSON 请求缓存。</td></tr>
@@ -178,7 +178,7 @@ bash scripts/submit_slurm.sh /shared/outputs/runs/&lt;run_id&gt; \
 <div class="card"><h3>本地代理与工具服务</h3><p>每次外部教师尝试启动 loopback 采集代理；CLI 金融模式另连接带 token 的 finance MCP。原生模式直接使用语料文件，不创建 MCP。容器内须能访问本地代理。</p></div>
 <div class="card"><h3>协议兼容是部署条件</h3><p>Strands 需要 Chat Completions 工具调用；Codex 需要 Responses；CC 需要 Anthropic Messages。模型服务或网关须提供对应协议，并匹配工具 parser 与模板。</p></div>
 </div>
-<div class="callout"><strong>工具模式决定执行边界。</strong><p>CLI 使用独立临时 HOME 和工作目录；finance 限定金融工具，native 启用框架自带工具且拒绝 MCP 注入。Codex native 保留所选 sandbox，Strands native 在子进程内运行官方工具。Linux 超时终止对应进程组并冻结记录。工具配置与完整性校验不能代替操作系统隔离；不重新执行任意 shell 命令来校验结果。</p></div>
+<div class="callout"><strong>执行配置与内容审核分别负责。</strong><p>CLI 使用独立临时 HOME 和工作目录。web 模式允许原生搜索、网页访问和用户配置的 MCP，不按项目工具白名单筛选。静态和旧金融模式保留兼容接口；Codex 保留配置的 sandbox，Strands 在独立子进程加载官方或自定义工具。实际调用与观察保留原格式，来源、时间和解答通过共同审核；不重新执行任意 shell 命令来校验结果。</p></div>
 </section>
 
 <section class="section" id="recovery">

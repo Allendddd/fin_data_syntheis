@@ -154,7 +154,7 @@ class AgentCollectionTests(unittest.TestCase):
 
     def test_runtime_defaults_and_unknown_role(self):
         configured = materialize_defaults({"version": 3, "training": {}})
-        self.assertEqual(configured["training"]["agent_runtime"]["default"], "native")
+        self.assertEqual(configured["training"]["agent_runtime"]["default"], "codex")
         configured["training"]["agent_runtime"]["by_role"] = {"missing": "codex"}
         with self.assertRaisesRegex(ConfigError, "unknown LLM role"):
             validate_cross_fields(configured)

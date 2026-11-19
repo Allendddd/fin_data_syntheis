@@ -4,7 +4,7 @@
 
 在 Linux 上采集 Claude Code/Codex agent 事件与 vLLM/SGLang 模型请求，见 [Agent 轨迹采集](docs/agent-tracing.md)。
 
-长程教师合成可配置 Strands、Codex 或 Claude Code 作为执行 runtime，统一调用金融工具并保留原始轨迹，见 [教师 runtimes](docs/teacher-runtimes.md)。
+长程教师合成默认使用 Codex，也可配置 Strands 或 Claude Code，保留实际工具与原始轨迹；web 模式保留框架工具，`search_endpoint` 可配置其搜索后端，见 [教师 runtimes](docs/teacher-runtimes.md)。
 
 金融数据合成流水线：从 JSONL/Parquet 语料构造并验证长程 query，再按需让强模型在冻结语料的 harness 中执行 query，采集 SFT `messages` 轨迹。query 可交给项目外的 OPD 流程；本项目提供共用的执行与私有校验环境，不包含模型训练器、学生策略调用或参数更新。
 
@@ -42,11 +42,14 @@ cp config/mint-synth.example.yaml config/production.yaml
 - `input.paths`、`input.text_field`、`input.metadata_fields`：语料和正文、日期、实体等元数据。`input.available_at_field` 需要列入元数据。
 - `run.cutoff`、`run.work_dir`、`output.root`：冻结截止日、工作目录和输出目录。
 - `llm.endpoints`、`llm.roles`：基础合成角色使用 OpenAI-compatible Chat Completions 服务；长程教师按 runtime 使用 Chat Completions、Responses 或 Anthropic Messages，详见 [教师 runtimes](docs/teacher-runtimes.md)。密钥通过配置指定的环境变量传入。
-- `query_realization.seed_file`：可选的长程任务种子 JSONL。
+- `query_realization.seed_file`：可选的长程任务种子 JSONL，每条只需 `{"query":"研究请求"}`；`seed_prepare` 自动解析并缓存内部规格。
+- `training.agent_runtime.default`：默认 `codex`，仍可选择其他 harness；`harness.retrieval.mode` 独立选择原始文件 `static` 或联网 `web`，参见[资源与重新采集](docs/retrieval-and-collection.md)。
 - `query_export.enabled`：导出经过验证的长程 query；`min_train_queries` 是发布门槛。
 - `training.enabled`：是否采集教师 SFT 轨迹；`training.teacher_role` 可选择单独配置的 `llm.roles.teacher`。其余 `training.*` 字段只用于数据筛选、教师 rollout 和 SFT 样本门槛，不执行模型训练。
 
 只合成长程 query 时，设置 `training.enabled: false`、`atomic.enabled: false`，保持 `query_export.enabled: true`。标签与种子筛选见 [SFT 数据文档](docs/sft-v3.md)。
+
+已有冻结任务可使用 `mint-synth collect --run-dir <原运行目录> --config <采集配置> --output-dir <新采集目录>` 重新生成教师样本，无须重新合成 query，也不修改原运行。
 
 ## 本地运行与恢复
 

@@ -54,15 +54,28 @@ REVIEW_SYSTEM = (
     "in actions: relevant means it contributes to acquiring evidence, computing or supporting the answer. "
     "Failed or nonexistent calls, repetition without new evidence, and unrelated work are not relevant. "
     "Use actions=[] when no actions are supplied. Mark any uncertain or failed check false and explain it. "
+    "Also include checks.reference_consistent: the candidate's financial facts, periods and relations "
+    "must be consistent with the hidden reference, allowing valid alternative derivations. "
+    "Source identity metadata is evaluator-only; it does not establish that unseen text was acquired. "
+    "For provider-managed tools distinguish source_records metadata.evidence_visibility: tool_observation is "
+    "visible returned evidence, verifier_snapshot is a separate evaluator fetch of a URL actually returned by "
+    "the hosted tool. Use the latter only to verify cited facts against that source and the reference; never "
+    "claim its body was in the agent context or use it to invent candidate reasoning. Missing or uncertain "
+    "provenance fails support. Tool names and providers do not determine financial correctness. "
+    "When an acquired fact comes from a different original source than the reference, include in that fact "
+    "reference_bindings=[{fact_id:reference fact ID,entity:normalized reference entity,period:normalized reference period,"
+    "metric:normalized reference metric,scope_quotes:[exact spans from actually acquired text]}]. "
+    "Verify those spans establish the same entity, reporting scope, metric and time period, not merely the same number. "
+    "Never invent a cross-source correspondence. No global mapping between the two corpora is required. "
     "Never invent quotes or missing steps."
 )
 
 
 def review_user(task: Mapping[str, Any], response: str, *, acquired: Mapping[str, str] | None = None,
-                actions: list[dict[str, Any]] | None = None) -> str:
+                actions: list[dict[str, Any]] | None = None, source_records: Mapping[str, Any] | None = None) -> str:
     return json.dumps({
         "context": task.get("input", {}).get("context", "") if acquired is None else dict(acquired),
-        "question": task["question"], "actions": actions or [],
+        "question": task["question"], "actions": actions or [], "source_records": source_records or {},
         "capability": task.get("capability"), "candidate": response,
         "private_reference": {key: task.get(key) for key in ("answer", "reasoning_trace", "evidence", "evidence_graph")},
     }, ensure_ascii=False)
@@ -206,6 +219,14 @@ def verify_review(
                 source_text = context if acquired is None else acquired.get(str(item.get("chunk_id")), "")
                 if not isinstance(quote, str) or not quote.strip() or quote not in source_text:
                     return False, "review fact quote is absent from context", details
+                if acquired is None and task.get("task_type") == "atomic":
+                    support = [fact for fact in task.get("evidence", []) if isinstance(fact.get("quote"), str)
+                               and (quote in fact["quote"] or fact["quote"] in quote)]
+                    if canonical_decimal(item["value"]) is not None:
+                        support = [fact for fact in support if _same_value(item["value"],
+                            fact.get("value_num") if fact.get("value_num") is not None else fact.get("value_text"), tolerance)]
+                    if not support:
+                        return False, "candidate premise is outside the atomic task's declared evidence", details
                 if (canonical_decimal(item["value"]) is not None
                         and _number_bound(item["value"], quote, item, tolerance) is not True):
                     return False, "review fact value disagrees with its source quote", details
@@ -286,6 +307,7 @@ def assess_solution(
     task: Mapping[str, Any], response: str, reviewer: Any, *, tolerance: str = "1e-6",
     acquired: Mapping[str, str] | None = None, actions: list[dict[str, Any]] | None = None,
     sample_key: str | None = None, final_response: str | None = None,
+    source_records: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate only actual observed evidence; keep all feedback evaluator-side.
 
@@ -311,13 +333,19 @@ def assess_solution(
                 "reason": reason, "method": "legacy_structured_submission"}
     try:
         review = reviewer.complete_json(
-            system=REVIEW_SYSTEM, user=review_user(task, response, acquired=acquired, actions=actions),
+            system=REVIEW_SYSTEM, user=review_user(task, response, acquired=acquired, actions=actions, source_records=source_records),
             temperature=0.0, max_tokens=6000,
             sample_key="solution-review-v1:" + str(sample_key or task["task_id"]) + ":" +
                        hashlib.sha256(response.encode("utf-8")).hexdigest(),
         )
         valid, reason, replay = verify_review(task, response, review, tolerance=tolerance, acquired=acquired,
                                              final_response=final_response)
+        if valid and source_records is not None:
+            from .source_binding import verify_source_bindings
+            valid, reason, bindings = verify_source_bindings(task, review, source_records, acquired or {}, tolerance=tolerance)
+            replay["source_bindings"] = bindings
+            if valid and review.get("checks", {}).get("reference_consistent") is not True:
+                valid, reason = False, "candidate financial relations were not verified against the task reference"
     except Exception as exc:
         return {"accepted": False, "answer_correct": False, "derivation_valid": False,
                 "reason": f"independent solution review failed: {exc}",

@@ -17,7 +17,7 @@ from typing import Any
 
 from mint_synth.core.run_state import atomic_json
 
-from .strands_native import NATIVE_TOOLS
+from .base import StrandsSettings
 from .strands_runtime import _Recorder, _json_value
 
 
@@ -40,14 +40,39 @@ async def invoke(payload: dict[str, Any]) -> dict[str, Any]:
     outcome: dict[str, Any] = {"status": "failed", "error": "Strands native worker did not start"}
     try:
         names = payload["tools"]
-        if (not isinstance(names, list) or not names or len(set(names)) != len(names)
-                or any(name not in NATIVE_TOOLS for name in names)):
-            raise ValueError("unsupported Strands native tool selection")
+        if not isinstance(names, list):
+            raise ValueError("Strands tools must be an array of importable module names")
+        StrandsSettings(mode="native", tools=tuple(names))
         from strands import Agent
         from strands.models.openai import OpenAIModel
         from strands.tools.executors import SequentialToolExecutor
 
-        tools = [importlib.import_module("strands_tools." + name) for name in names]
+        tools = [importlib.import_module(name if "." in name else "strands_tools." + name) for name in names]
+        if payload.get("search_binding"):
+            from .strands_search import bind_search_tool
+            tools = bind_search_tool(tools, payload["search_binding"])
+        if payload.get("resource_server"):
+            from strands.tools.tools import PythonAgentTool
+            import httpx
+            resource = payload["resource_server"]
+            def resource_tool(definition):
+                function = definition["function"]
+                async def call(tool_use, **_state):
+                    def request():
+                        response = httpx.post(resource["url"], headers={"Authorization": "Bearer " + resource["token"],
+                            "MCP-Protocol-Version": "2025-06-18"}, json={"jsonrpc": "2.0", "id": tool_use["toolUseId"],
+                            "method": "tools/call", "params": {"name": function["name"], "arguments": tool_use.get("input", {})}}, timeout=60)
+                        response.raise_for_status()
+                        body = response.json()
+                        if "error" in body:
+                            raise ValueError("resource tool protocol error")
+                        return body["result"]
+                    result = await asyncio.to_thread(request)
+                    return {"toolUseId": tool_use["toolUseId"], "status": "error" if result.get("isError") else "success",
+                            "content": result["content"]}
+                return PythonAgentTool(tool_name=function["name"], tool_spec={"name": function["name"],
+                    "description": function["description"], "inputSchema": {"json": function["parameters"]}}, tool_func=call)
+            tools.extend(resource_tool(definition) for definition in resource["definitions"])
         model = payload["model"]
         sdk_model = OpenAIModel(model_id=model["model"], client_args={
             "base_url": model["base_url"], "api_key": os.environ.get("MINT_MODEL_API_KEY", "local-model"),
@@ -57,8 +82,8 @@ async def invoke(payload: dict[str, Any]) -> dict[str, Any]:
         def callback(*args: Any, **kwargs: Any) -> None:
             recorder.event("sdk", kwargs if not args else {"args": args, "kwargs": kwargs})
 
-        # Keep SDK defaults for system instructions. Supply only official tools;
-        # no custom finance functions, hooks, or final-submission tool are added.
+        # Keep SDK defaults and official native tools. Configured resources add
+        # source adapters without a custom final-submission tool or hidden task.
         agent = Agent(model=sdk_model, tools=tools, callback_handler=callback,
                       tool_executor=SequentialToolExecutor(), load_tools_from_directory=False, retry_strategy=None)
         recorder.event("runtime_started", {"runtime": "strands", "mode": "native", "tools": names})

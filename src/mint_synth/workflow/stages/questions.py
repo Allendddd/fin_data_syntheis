@@ -22,6 +22,7 @@ from mint_synth.synthesis.seed_constraints import formulas_for_seed
 from mint_synth.workflow.planner import stage_by_name
 
 from .common import _client_stats, _compression, _envelope_writer, _grouped_payloads, _quarantine_writer, _role_client
+from .seeds import prepared_seeds
 
 
 def stage_atomic(
@@ -202,11 +203,8 @@ def stage_graph_planning(
         write_empty(output / "quarantine.parquet", quarantine_schema(), compression=_compression(config))
         return {"entities": 0, "rule_graphs": 0, "graphs": 0, "llm": {}}
     formulas = load_formula_registry(str(config["dag"]["formula_registry"]))
-    seeds = load_seed_bank(config["query_realization"].get("seed_file"))
+    seeds = prepared_seeds(layout, config)
     training = config.get("training", {})
-    if training.get("seed_fallback") and config["query_realization"].get("seed_file"):
-        present = {seed["seed_id"] for seed in seeds}
-        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS if seed["seed_id"] not in present)
     wanted_ids = set(training.get("seed_ids") or [])
     if wanted_ids:
         seeds = [seed for seed in seeds if seed["seed_id"] in wanted_ids]
@@ -378,10 +376,7 @@ def stage_query_realization(
         }
     constructor = _role_client(layout, config, "query_realization", shard_id, "constructor")
     auditor = _role_client(layout, config, "query_realization", shard_id, "auditor")
-    seeds = load_seed_bank(config["query_realization"].get("seed_file"))
-    if config.get("training", {}).get("seed_fallback") and config["query_realization"].get("seed_file"):
-        present = {seed["seed_id"] for seed in seeds}
-        seeds.extend(dict(seed) for seed in DEFAULT_SEEDS if seed["seed_id"] not in present)
+    seeds = prepared_seeds(layout, config)
     invalid_seeds = [seed.get("seed_id") for seed in seeds if not isinstance(seed.get("task_spec_template"), dict)]
     if invalid_seeds:
         raise ValueError(

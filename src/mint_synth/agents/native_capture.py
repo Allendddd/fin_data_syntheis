@@ -108,7 +108,11 @@ def native_response(call: Mapping[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _declared_tools(request: Mapping[str, Any]) -> set[str]:
+def resource_mcp(name: str) -> bool:
+    return str(name) in {"mcp__finance__" + n for n in ("search_documents", "read_document", "search_web", "read_web", "calculate")}
+
+
+def _declared_tools(request: Mapping[str, Any], *, allow_resources: bool = False, unrestricted_web: bool = False) -> set[str]:
     def names(tools: Any) -> set[str]:
         if not isinstance(tools, list):
             raise TrajectoryError("native request tools must be an array")
@@ -116,11 +120,11 @@ def _declared_tools(request: Mapping[str, Any]) -> set[str]:
         for tool in tools:
             if not isinstance(tool, dict):
                 raise TrajectoryError("invalid native tool definition")
-            if tool.get("type") == "mcp":
+            if tool.get("type") == "mcp" and not unrestricted_web:
                 raise TrajectoryError("native capture contains MCP definitions")
             name = tool.get("name") or tool.get("function", {}).get("name")
             if isinstance(name, str):
-                if name.startswith("mcp__"):
+                if name.startswith("mcp__") and not (unrestricted_web or allow_resources and resource_mcp(name)):
                     raise TrajectoryError("native capture contains MCP definitions")
                 result.add(name)
             if tool.get("type") == "namespace":
@@ -129,15 +133,16 @@ def _declared_tools(request: Mapping[str, Any]) -> set[str]:
     return names(request.get("tools", []))
 
 
-def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False) -> list[dict[str, Any]]:
-    declared = _declared_tools(call["request"])
+def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False, allow_resources: bool = False,
+          unrestricted_web: bool = False) -> list[dict[str, Any]]:
+    declared = _declared_tools(call["request"], allow_resources=allow_resources, unrestricted_web=unrestricted_web)
     result = []
     if call["protocol"] == "responses":
         for item in response["output"]:
             kind = item.get("type", "")
             if kind in {"function_call", "custom_tool_call"}:
                 name = item.get("name")
-                if (name not in declared and not allow_unknown) or str(name).startswith("mcp__"):
+                if (name not in declared and not allow_unknown) or (str(name).startswith("mcp__") and not (unrestricted_web or allow_resources and resource_mcp(name) and name in declared)):
                     raise TrajectoryError("native response used an undeclared or MCP tool")
                 arguments = item.get("arguments") if kind == "function_call" else item.get("input")
                 if kind == "function_call":
@@ -147,8 +152,23 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown
                 else:
                     # Free-form input (for example apply_patch) stays free-form.
                     arguments = {"_raw_input": arguments}
-                result.append({"id": item.get("call_id"), "name": name, "input": arguments, "known_tool": name in declared})
-            elif kind.startswith("mcp_"):
+                result.append({"id": item.get("call_id"), "name": name, "namespace": item.get("namespace"), "input": arguments, "known_tool": name in declared})
+            elif unrestricted_web and (kind.endswith("_call") or kind == "mcp_call") and kind != "shell_call":
+                # Hosted tools execute inside the provider response. Preserve
+                # their own names, arguments and embedded observations.
+                arguments = item.get("action", item.get("arguments", {}))
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except ValueError:
+                        arguments = {"_raw_input": arguments}
+                client_call = kind in {"computer_call", "local_shell_call", "apply_patch_call"}
+                hosted = not client_call and (kind in {"web_search_call", "file_search_call", "code_interpreter_call", "image_generation_call", "mcp_call"}
+                                               or any(key in item for key in ("output", "results")))
+                result.append({"id": item.get("call_id") or item.get("id"),
+                               "name": item.get("name") or kind, "input": arguments,
+                               "known_tool": True, "hosted": hosted, "item_type": kind})
+            elif kind.startswith("mcp_") and not unrestricted_web:
                 raise TrajectoryError("native capture contains an MCP operation")
             elif kind == "shell_call":
                 if not any(tool.get("type") == "shell" for tool in call["request"].get("tools", [])):
@@ -160,7 +180,7 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown
         for item in response["choices"][0]["message"].get("tool_calls", []) or []:
             function = item.get("function", {})
             name = function.get("name")
-            if (name not in declared and not allow_unknown) or str(name).startswith("mcp__"):
+            if (name not in declared and not allow_unknown) or (str(name).startswith("mcp__") and not (unrestricted_web or allow_resources and resource_mcp(name) and name in declared)):
                 raise TrajectoryError("native response used an undeclared or MCP tool")
             arguments = function.get("arguments", {})
             arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -172,8 +192,10 @@ def _uses(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown
     return result
 
 
-def _reply(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False) -> tuple[str, str | None]:
-    if _uses(call, response, allow_unknown=allow_unknown):
+def _reply(call: Mapping[str, Any], response: Mapping[str, Any], *, allow_unknown: bool = False, allow_resources: bool = False,
+           unrestricted_web: bool = False) -> tuple[str, str | None]:
+    uses = _uses(call, response, allow_unknown=allow_unknown, allow_resources=allow_resources, unrestricted_web=unrestricted_web)
+    if any(not use.get("hosted") for use in uses):
         return "", None
     if call["protocol"] == "responses":
         messages = [item for item in response["output"] if item.get("type") == "message" and item.get("phase") != "commentary"]
@@ -190,12 +212,48 @@ def _results(call: Mapping[str, Any]):
     request = call["request"]
     if call["protocol"] == "responses":
         for item in request.get("input", []) if isinstance(request.get("input"), list) else []:
-            if item.get("type") in {"function_call_output", "custom_tool_call_output", "shell_call_output"}:
+            if item.get("type", "").endswith("_output") and item.get("call_id"):
                 yield item.get("call_id"), item.get("output")
     else:
         for item in request.get("messages", []):
             if item.get("role") == "tool":
                 yield item.get("tool_call_id"), item.get("content")
+
+
+def hosted_results(response: Mapping[str, Any], uses: list[dict[str, Any]]):
+    """Return provider-executed results without inventing client tool turns."""
+    items = {item.get("call_id") or item.get("id"): item for item in response.get("output", [])}
+    annotations = [annotation for item in response.get("output", []) for block in item.get("content", [])
+                   for annotation in block.get("annotations", []) if isinstance(annotation, dict)]
+    web_ids = [use["id"] for use in uses if use.get("item_type") == "web_search_call"]
+    for use in uses:
+        if not use.get("hosted"):
+            continue
+        item = items.get(use["id"], {})
+        if item.get("status") not in {None, "completed", "failed"}:
+            continue
+        result = copy.deepcopy(item)
+        if use.get("item_type") == "web_search_call":
+            if item.get("status") not in {"completed", "failed"}:
+                continue
+            action = item.get("action", {})
+            from .web_evidence import _url, _urls
+            source_urls = set(_urls(action.get("sources", [])))
+            if action.get("url"):
+                source_urls.add(_url(action["url"]))
+            citations = [annotation for annotation in annotations if _url(annotation.get("url")) in source_urls] if source_urls else (
+                annotations if len(web_ids) == 1 else [{**annotation, "evidence_attribution": "provider_response",
+                                                      "tool_use_ids": web_ids} for annotation in annotations]
+                if use["id"] == web_ids[-1] else [])
+            result = {"status": item.get("status"), "sources": action.get("sources", []),
+                      "provider_citations": citations}
+            if action.get("type") in {"open_page", "find_in_page"} and action.get("url"):
+                result["opened_page"] = {"url": action["url"]}
+        elif use.get("item_type") == "mcp_call":
+            if item.get("output") is None and not item.get("error"):
+                continue
+            result = {key: item[key] for key in ("output", "error", "status") if key in item}
+        yield use["id"], result
 
 
 def _returned_text(value: Any) -> str:
@@ -279,12 +337,13 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
             if call["protocol"] != expected:
                 raise TrajectoryError("native export protocol mismatch")
             response = native_response(call)
-            uses = _uses(call, response, allow_unknown=True)
+            web = bool(snapshot.get("unrestricted_web"))
+            uses = _uses(call, response, allow_unknown=True, allow_resources=bool(snapshot.get("resource_mode")), unrestricted_web=web)
             flags = snapshot.get("action_relevance", {})
             if any(use["id"] not in flags for use in uses):
                 raise TrajectoryError("native export has no action relevance decision")
             for use in uses:
-                if use.get("known_tool") is False and use["id"] not in snapshot.get("failed_tool_ids", []):
+                if use.get("known_tool") is False and use["id"] not in snapshot.get("failed_tool_ids", []) and not web:
                     raise TrajectoryError("native response used an undeclared tool without a recorded failure")
             call_loss = all(flags.get(use["id"], {}).get("relevant", True) for use in uses)
             sample = copy.deepcopy(call["request"])
@@ -298,12 +357,22 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
                 sample["output"] = copy.deepcopy(response["output"])
                 sample["input_loss_mask"] = [False] * (len(context) if isinstance(context, list) else 1)
                 sample["target_output_loss_mask"] = [
-                    (flags.get(item.get("call_id"), {}).get("relevant", call_loss)
-                     if item.get("type") in {"function_call", "custom_tool_call", "shell_call"} else call_loss)
+                    (flags.get(item.get("call_id") or item.get("id"), {}).get("relevant", call_loss)
+                     if item.get("type", "").endswith("_call") else call_loss)
                     and not item.get("type", "").endswith("_output")
+                    and item.get("type") not in {"mcp_list_tools", "mcp_approval_request", "compaction"}
                     and not (item.get("type") == "reasoning" and not (item.get("content") or item.get("summary")))
                     for item in response["output"]
                 ]
+                sample["target_output_field_loss_mask"] = {
+                    str(index): {key: key in {"name", "arguments", "input", "action", "queries", "code", "prompt"} for key in item}
+                    | ({"action.sources": False} if isinstance(item.get("action"), dict) and "sources" in item["action"] else {})
+                    for index, item in enumerate(response["output"])
+                    if any(use.get("hosted") and use["id"] == (item.get("call_id") or item.get("id")) for use in uses)}
+                if web:
+                    sample["target_output_field_loss_mask"].update({
+                        str(index): {"content": True, "content.annotations": False}
+                        for index, item in enumerate(response["output"]) if item.get("type") == "message"})
                 sample["target_reasoning_text_fields"] = {
                     str(index): {"content": bool(item.get("content")), "summary": bool(item.get("summary")),
                                  "encrypted_content": False}
@@ -324,7 +393,7 @@ def export_native_capture(snapshot: Mapping[str, Any], trace_dir: Path, runtime:
                 sample["response_metadata"] = {key: value for key, value in response.items() if key != "choices"}
                 sample["response_metadata"]["choice"] = {key: value for key, value in response["choices"][0].items() if key != "message"}
             if call["call_id"] == snapshot["final_call_id"]:
-                _, message_id = _reply(call, response)
+                _, message_id = _reply(call, response, allow_unknown=web, allow_resources=bool(snapshot.get("resource_mode")), unrestricted_web=web)
                 if message_id != snapshot.get("final_message_id"):
                     raise TrajectoryError("native final response differs from its audit")
                 final_seen = True

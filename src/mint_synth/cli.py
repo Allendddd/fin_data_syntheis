@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="Report shard and publication status")
     status.add_argument("--run-dir", required=True)
 
+    collect = commands.add_parser("collect", help="Collect teacher samples from frozen validated tasks without re-synthesizing queries")
+    collect.add_argument("--run-dir", required=True, help="Source immutable synthesis run")
+    collect.add_argument("--config", required=True, help="Teacher/harness/resource configuration")
+    collect.add_argument("--output-dir", required=True, help="New private collection directory")
+
     validate = commands.add_parser("validate", help="Validate run structure, signatures, and completion")
     validate.add_argument("--run-dir", required=True)
 
@@ -80,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "config":
+            from mint_synth.agents.base import search_backend_contract
             resolved = load_config(args.config)
             _json(
                 {
@@ -88,6 +94,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "fingerprint": config_fingerprint(resolved),
                     "input_paths": resolved["input"]["paths"],
                     "output_root": resolved["output"]["root"],
+                    "default_harness": resolved.get("training", {}).get("agent_runtime", {}).get("default"),
+                    "retrieval_mode": resolved.get("harness", {}).get("retrieval", {}).get("mode", "legacy_snapshot"),
+                    "search_backend": search_backend_contract(resolved),
                 }
             )
             return 0
@@ -105,6 +114,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "status":
             _json(run_status(args.run_dir))
+            return 0
+        if args.command == "collect":
+            from mint_synth.sft.collection import collect_frozen_tasks
+            _json(collect_frozen_tasks(args.run_dir, args.config, args.output_dir))
             return 0
         if args.command == "validate":
             report = validate_run_structure(args.run_dir)
